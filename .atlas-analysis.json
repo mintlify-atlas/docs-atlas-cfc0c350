@@ -1,0 +1,152 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "Bron Crypto",
+  "projectDescription": "Advanced cryptography library for multi-party computation, threshold signatures, and zero-knowledge proofs in Go",
+  "theme": "aspen",
+  "primaryColor": "#0f0b1d",
+  "lightColor": "#bba8ea",
+  "darkColor": "#7c7c9c",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Get Started",
+        "groups": [
+          {
+            "group": "Introduction",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Setup",
+            "pages": [
+              "setup/development",
+              "setup/building",
+              "setup/testing"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Core Concepts",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "concepts/architecture",
+              "concepts/security",
+              "concepts/design-principles"
+            ]
+          },
+          {
+            "group": "Fundamentals",
+            "pages": [
+              "concepts/threshold-cryptography",
+              "concepts/mpc",
+              "concepts/zero-knowledge-proofs"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "MPC & Threshold Signatures",
+            "pages": [
+              "api/mpc/threshold-schnorr",
+              "api/mpc/threshold-ecdsa",
+              "api/mpc/threshold-bls",
+              "api/mpc/dkg",
+              "api/mpc/secret-sharing"
+            ]
+          },
+          {
+            "group": "Cryptographic Primitives",
+            "pages": [
+              "api/primitives/encryption",
+              "api/primitives/commitments",
+              "api/primitives/hashing",
+              "api/primitives/signatures"
+            ]
+          },
+          {
+            "group": "Zero-Knowledge Proofs",
+            "pages": [
+              "api/proofs/sigma-protocols",
+              "api/proofs/compilers",
+              "api/proofs/composition"
+            ]
+          },
+          {
+            "group": "Base Libraries",
+            "pages": [
+              "api/base/curves",
+              "api/base/algebra",
+              "api/base/number-theory"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Examples",
+            "pages": [
+              "guides/threshold-signing",
+              "guides/custom-protocols",
+              "guides/networking"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "guides/security-best-practices",
+              "guides/performance",
+              "guides/contributing"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Threshold Schnorr signatures (Lindell22)",
+    "Threshold ECDSA with multiple variants (DKLs23, Lindell17)",
+    "Threshold BLS signatures (Boldyreva02)",
+    "Distributed key generation (DKG) and secret sharing",
+    "Sigma protocols with Fiat-Shamir and Fischlin compilers",
+    "Homomorphic encryption (Paillier)",
+    "Zero-knowledge proofs with composition (AND/OR)",
+    "Oblivious transfer and OT extensions",
+    "Side-channel resistant elliptic curve operations",
+    "Modular and reusable cryptographic components"
+  ],
+  "publicApiSurface": [
+    "pkg/mpc/tsig/tschnorr/lindell22",
+    "pkg/mpc/tsig/tecdsa/dkls23",
+    "pkg/mpc/tsig/tecdsa/lindell17",
+    "pkg/mpc/tsig/tbls/boldyreva02",
+    "pkg/mpc/dkg",
+    "pkg/mpc/sharing",
+    "pkg/encryption/paillier",
+    "pkg/encryption/hpke",
+    "pkg/commitments/pedersen",
+    "pkg/commitments/hash",
+    "pkg/proofs/sigma",
+    "pkg/proofs/sigma/compiler/fiatshamir",
+    "pkg/proofs/sigma/compiler/fischlin",
+    "pkg/proofs/sigma/compose/sigand",
+    "pkg/proofs/sigma/compose/sigor",
+    "pkg/signatures/schnorrlike",
+    "pkg/signatures/ecdsa",
+    "pkg/signatures/bls",
+    "pkg/ot/base",
+    "pkg/ot/extension",
+    "pkg/base/curves",
+    "pkg/base/algebra"
+  ]
+}
