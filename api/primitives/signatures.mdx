@@ -1,0 +1,642 @@
+---
+title: 'Signatures'
+description: 'Digital signature schemes including Schnorr, ECDSA, and BLS signatures'
+---
+
+## Overview
+
+The signatures package provides generic interfaces and implementations for digital signature schemes:
+
+- **Schnorr**: Simple Schnorr signatures and variants (BIP-340, Mina)
+- **ECDSA**: Elliptic Curve Digital Signature Algorithm with recovery
+- **BLS**: Boneh-Lynn-Shacham signatures with aggregation
+
+## Core Interfaces
+
+### Scheme
+
+The main signature scheme interface providing factory methods for key generation, signing, and verification.
+
+```go
+type Scheme[SK, PK, M, S, KG, SG, VF] interface {
+    Name() Name
+    Keygen(...KeyGeneratorOption) (KG, error)
+    Signer(SK, ...SignerOption) (SG, error)
+    Verifier(...VerifierOption) (VF, error)
+}
+```
+
+### KeyGenerator
+
+Generates public/private key pairs for signature schemes.
+
+```go
+type KeyGenerator[SK, PK] interface {
+    Generate(prng io.Reader) (SK, PK, error)
+}
+```
+
+<ResponseField name="sk" type="SK">
+  Private signing key
+</ResponseField>
+
+<ResponseField name="pk" type="PK">
+  Public verification key
+</ResponseField>
+
+### Signer
+
+Creates signatures on messages using a private key.
+
+```go
+type Signer[M, S] interface {
+    Sign(message M) (S, error)
+}
+```
+
+<ParamField path="message" type="M" required>
+  Message to sign
+</ParamField>
+
+<ResponseField name="signature" type="S">
+  Digital signature
+</ResponseField>
+
+### Verifier
+
+Verifies signatures against messages and public keys.
+
+```go
+type Verifier[PK, M, S] interface {
+    Verify(signature S, publicKey PK, message M) error
+}
+```
+
+<ParamField path="signature" type="S" required>
+  Signature to verify
+</ParamField>
+
+<ParamField path="publicKey" type="PK" required>
+  Signer's public key
+</ParamField>
+
+<ParamField path="message" type="M" required>
+  Signed message
+</ParamField>
+
+<ResponseField name="error" type="error">
+  nil if valid, error otherwise
+</ResponseField>
+
+---
+
+## Schnorr Signatures
+
+Schnorr signatures are simple, provably secure signatures based on the discrete logarithm problem.
+
+### Features
+
+- **Provable Security**: Secure under discrete logarithm assumption
+- **Linearity**: Signatures can be aggregated
+- **Deterministic**: RFC 6979-style nonce generation
+- **Batch Verification**: Verify multiple signatures efficiently
+
+### Location
+
+Source: `~/workspace/source/pkg/signatures/schnorrlike/schnorrlike.go:1`
+
+### Signature Construction
+
+Schnorr signatures have the form `(R, s)` where:
+- `R = k·G` (nonce commitment)
+- `s = k + e·x` (response)
+- `e = H(R || P || m)` (challenge)
+- `x` is private key, `P = x·G` is public key
+
+### Creating a Scheme
+
+Schnorr signatures come in variants with different nonce generation and challenge computation:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+    "github.com/bronlabs/bron-crypto/pkg/signatures/schnorrlike/schnorr"
+)
+
+curve := k256.NewCurve()
+field := k256.NewScalarField()
+
+scheme, err := schnorr.NewScheme(curve.Group(), field)
+```
+
+### Key Generation
+
+```go
+kg, err := scheme.Keygen()
+sk, pk, err := kg.Generate(prng)
+```
+
+**Key Types:**
+- `*PrivateKey[GE, S]`: Scalar x in [1, n-1]
+- `*PublicKey[GE, S]`: Curve point P = x·G
+
+### Signing
+
+```go
+signer, err := scheme.Signer(sk)
+message := []byte("message to sign")
+signature, err := signer.Sign(message)
+```
+
+### Verification
+
+```go
+verifier, err := scheme.Verifier()
+err = verifier.Verify(signature, pk, message)
+if err != nil {
+    // Invalid signature
+}
+```
+
+### BIP-340 Variant
+
+BIP-340 is Bitcoin's Schnorr signature standard:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/signatures/schnorrlike/bip340"
+)
+
+// BIP-340 uses secp256k1
+curve := k256.NewCurve()
+scheme := bip340.NewScheme(curve)
+
+kg, _ := scheme.Keygen()
+sk, pk, _ := kg.Generate(prng)
+
+signer, _ := scheme.Signer(sk)
+signature, _ := signer.Sign(message)
+
+verifier, _ := scheme.Verifier()
+err := verifier.Verify(signature, pk, message)
+```
+
+**BIP-340 Features:**
+- Even y-coordinate for R (reduces signature size)
+- Tagged hashing for domain separation
+- x-only public keys
+- Batch verification support
+
+### Complete Example
+
+```go
+package main
+
+import (
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+    "github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+    "github.com/bronlabs/bron-crypto/pkg/signatures/schnorrlike/bip340"
+)
+
+func main() {
+    prng := pcg.NewRandomised()
+    
+    // Setup BIP-340 scheme
+    curve := k256.NewCurve()
+    scheme := bip340.NewScheme(curve)
+    
+    // Generate keys
+    kg, _ := scheme.Keygen()
+    sk, pk, _ := kg.Generate(prng)
+    
+    // Sign message
+    message := []byte("Hello, Bitcoin!")
+    signer, _ := scheme.Signer(sk)
+    signature, _ := signer.Sign(message)
+    
+    // Verify signature
+    verifier, _ := scheme.Verifier()
+    err := verifier.Verify(signature, pk, message)
+    // err == nil means valid
+}
+```
+
+---
+
+## ECDSA Signatures
+
+ECDSA is the widely-used signature standard for elliptic curves, used in TLS, Bitcoin, and Ethereum.
+
+### Features
+
+- **Industry Standard**: FIPS 186-5, SEC1, ANSI X9.62
+- **Public Key Recovery**: Recover signer's public key from signature
+- **Deterministic Nonces**: RFC 6979 support
+- **Wide Compatibility**: Bitcoin, Ethereum, TLS
+
+### Location
+
+Source: `~/workspace/source/pkg/signatures/ecdsa/ecdsa.go:1`
+
+### Signature Construction
+
+ECDSA signatures have the form `(r, s, v)` where:
+- `r` = x-coordinate of `k·G`
+- `s = k⁻¹(z + r·x) mod n`
+- `z = digest of message (truncated)
+- `v` = recovery ID (optional, for public key recovery)
+
+### Creating a Scheme
+
+```go
+import (
+    "crypto/sha256"
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+    "github.com/bronlabs/bron-crypto/pkg/signatures/ecdsa"
+)
+
+curve := k256.NewCurve()
+field := k256.NewScalarField()
+
+scheme := ecdsa.NewScheme(curve, field, sha256.New)
+```
+
+<ParamField path="curve" type="Curve" required>
+  Elliptic curve (P-256, secp256k1, etc.)
+</ParamField>
+
+<ParamField path="field" type="ScalarField" required>
+  Scalar field for curve order
+</ParamField>
+
+<ParamField path="hashFunc" type="func() hash.Hash" required>
+  Hash function for message digests
+</ParamField>
+
+### Key Generation
+
+```go
+kg, err := scheme.Keygen()
+sk, pk, err := kg.Generate(prng)
+```
+
+### Signing
+
+```go
+signer, err := scheme.Signer(sk)
+message := []byte("transaction data")
+signature, err := signer.Sign(message)
+```
+
+### Verification
+
+```go
+verifier, err := scheme.Verifier()
+err = verifier.Verify(signature, pk, message)
+```
+
+### Public Key Recovery
+
+Recover the signer's public key from a signature with recovery ID:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/signatures/ecdsa"
+
+pk, err := ecdsa.RecoverPublicKey(suite, signature, message)
+// pk is the recovered public key
+```
+
+<ParamField path="suite" type="*Suite" required>
+  ECDSA suite with curve and hash function
+</ParamField>
+
+<ParamField path="signature" type="*Signature" required>
+  Signature with recovery ID (v field)
+</ParamField>
+
+<ParamField path="message" type="[]byte" required>
+  Original signed message
+</ParamField>
+
+**Use Cases:**
+- Ethereum transactions (verify against address, not full public key)
+- Compact verification (no need to transmit public key)
+- Bitcoin message signing
+
+### Computing Recovery ID
+
+```go
+recoveryID, err := ecdsa.ComputeRecoveryID(R)
+// recoveryID encodes:
+//   - bit 0: y-coordinate parity
+//   - bit 1: x-coordinate overflow
+```
+
+### Complete Example
+
+```go
+package main
+
+import (
+    "crypto/sha256"
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+    "github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+    "github.com/bronlabs/bron-crypto/pkg/signatures/ecdsa"
+)
+
+func main() {
+    prng := pcg.NewRandomised()
+    
+    // Setup ECDSA with secp256k1 (Bitcoin/Ethereum curve)
+    curve := k256.NewCurve()
+    field := k256.NewScalarField()
+    scheme := ecdsa.NewScheme(curve, field, sha256.New)
+    
+    // Generate keys
+    kg, _ := scheme.Keygen()
+    sk, pk, _ := kg.Generate(prng)
+    
+    // Sign
+    message := []byte("Ethereum transaction")
+    signer, _ := scheme.Signer(sk)
+    signature, _ := signer.Sign(message)
+    
+    // Verify
+    verifier, _ := scheme.Verifier()
+    err := verifier.Verify(signature, pk, message)
+    // err == nil means valid
+    
+    // Recover public key (if signature has recovery ID)
+    suite, _ := ecdsa.NewSuite(curve, field, sha256.New)
+    recoveredPK, _ := ecdsa.RecoverPublicKey(suite, signature, message)
+    // recoveredPK.Equal(pk) == true
+}
+```
+
+---
+
+## BLS Signatures
+
+BLS (Boneh-Lynn-Shacham) signatures enable efficient signature aggregation using pairing-friendly elliptic curves.
+
+### Features
+
+- **Signature Aggregation**: Combine n signatures into one
+- **Aggregate Verification**: Verify n signatures with ~2 pairings
+- **Short Signatures**: 48 bytes (short) or 96 bytes (long)
+- **Deterministic**: No nonce generation needed
+- **Rogue Key Protection**: Multiple prevention algorithms
+
+### Location
+
+Source: `~/workspace/source/pkg/signatures/bls/bls.go:1`
+
+### Signature Construction
+
+BLS signatures use bilinear pairings:
+- Signature: `σ = H(m)^x` where H maps to curve
+- Verification: `e(σ, G) = e(H(m), P)` where `P = x·G`
+
+### Variants
+
+**Short Key Variant:**
+- Public keys in G1 (48 bytes compressed)
+- Signatures in G2 (96 bytes compressed)
+- Use when keys transmitted frequently
+
+**Long Key Variant:**
+- Public keys in G2 (96 bytes compressed)
+- Signatures in G1 (48 bytes compressed)
+- Use when signatures transmitted frequently
+
+### Rogue Key Prevention
+
+- **Basic**: Requires distinct messages for aggregation
+- **MessageAugmentation**: Prepends public key to message
+- **POP (Proof of Possession)**: Requires proving key ownership
+
+### Creating a Scheme
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/pairable"
+    "github.com/bronlabs/bron-crypto/pkg/signatures/bls"
+)
+
+family := pairable.NewBLS12381()
+
+// Short public keys (48 bytes), long signatures (96 bytes)
+scheme, err := bls.NewShortKeyScheme(family, bls.Basic)
+
+// Or: Short signatures (48 bytes), long public keys (96 bytes)
+// scheme, err := bls.NewLongKeyScheme(family, bls.Basic)
+```
+
+<ParamField path="family" type="PairingFriendlyFamily" required>
+  Pairing-friendly curve (BLS12-381)
+</ParamField>
+
+<ParamField path="rogueKeyAlg" type="RogueKeyPreventionAlgorithm" required>
+  Algorithm for preventing rogue key attacks:
+  - `bls.Basic`: Distinct messages only
+  - `bls.MessageAugmentation`: Augment with public key
+  - `bls.POP`: Proof of possession required
+</ParamField>
+
+### Key Generation
+
+```go
+import (
+    "io"
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/pairable/bls12381"
+)
+
+sf := bls12381.NewScalarField()
+seed := make([]byte, sf.ElementSize())
+io.ReadFull(prng, seed)
+
+kg, _ := scheme.Keygen(bls.GenerateWithSeed[*bls12381.PointG1](seed))
+sk, pk, _ := kg.Generate(nil)
+```
+
+### Signing
+
+```go
+signer, err := scheme.Signer(sk)
+message := []byte("Hello, BLS!")
+signature, err := signer.Sign(message)
+```
+
+### Verification
+
+```go
+verifier, err := scheme.Verifier()
+err = verifier.Verify(signature, pk, message)
+```
+
+### Signature Aggregation
+
+Aggregate multiple signatures into one:
+
+```go
+// Sign same message with multiple keys
+sig1, _ := signer1.Sign(message)
+sig2, _ := signer2.Sign(message)
+sig3, _ := signer3.Sign(message)
+
+// Aggregate signatures
+aggSig, err := scheme.AggregateSignatures(sig1, sig2, sig3)
+```
+
+### Aggregate Verification
+
+Verify aggregated signature:
+
+```go
+verifier, _ := scheme.Verifier()
+
+// Verify against multiple public keys and messages
+err := verifier.AggregateVerify(
+    aggSig,
+    []*bls.PublicKey{pk1, pk2, pk3},
+    [][]byte{msg1, msg2, msg3},
+)
+```
+
+### Complete Example
+
+```go
+package main
+
+import (
+    "io"
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/pairable"
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/pairable/bls12381"
+    "github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+    "github.com/bronlabs/bron-crypto/pkg/signatures/bls"
+)
+
+func main() {
+    prng := pcg.NewRandomised()
+    
+    // Setup BLS scheme
+    family := pairable.NewBLS12381()
+    scheme, _ := bls.NewShortKeyScheme(family, bls.Basic)
+    
+    // Generate keys for 3 signers
+    sf := bls12381.NewScalarField()
+    var keys [3]*bls.PrivateKey
+    var pks [3]*bls.PublicKey
+    
+    for i := 0; i < 3; i++ {
+        seed := make([]byte, sf.ElementSize())
+        io.ReadFull(prng, seed)
+        kg, _ := scheme.Keygen(bls.GenerateWithSeed[*bls12381.PointG1](seed))
+        keys[i], pks[i], _ = kg.Generate(nil)
+    }
+    
+    // Each signer signs the same message
+    message := []byte("Aggregate this!")
+    var sigs [3]*bls.Signature
+    
+    for i := 0; i < 3; i++ {
+        signer, _ := scheme.Signer(keys[i])
+        sigs[i], _ = signer.Sign(message)
+    }
+    
+    // Aggregate signatures
+    aggSig, _ := scheme.AggregateSignatures(sigs[0], sigs[1], sigs[2])
+    
+    // Verify aggregated signature
+    verifier, _ := scheme.Verifier()
+    err := verifier.AggregateVerify(
+        aggSig,
+        pks[:],
+        [][]byte{message, message, message},
+    )
+    // err == nil means valid aggregate signature
+}
+```
+
+### Proof of Possession (POP)
+
+Prevent rogue key attacks with proof of possession:
+
+```go
+// Create scheme with POP
+scheme, _ := bls.NewShortKeyScheme(family, bls.POP)
+
+// Generate key and proof
+kg, _ := scheme.Keygen()
+sk, pk, _ := kg.Generate(prng)
+
+// Create proof of possession
+pop, err := bls.ProveKeyOwnership(sk)
+
+// Verify proof
+err = bls.VerifyKeyOwnership(pk, pop)
+
+// When verifying aggregates, provide POPs
+verifier, _ := scheme.Verifier(
+    bls.WithProofsOfPossession(map[*bls.PublicKey]*bls.ProofOfPossession{
+        pk1: pop1,
+        pk2: pop2,
+        pk3: pop3,
+    }),
+)
+```
+
+---
+
+## Comparison
+
+| Feature | Schnorr | ECDSA | BLS |
+|---------|---------|-------|-----|
+| Signature Size | 64 bytes | 64-65 bytes | 48 or 96 bytes |
+| Public Key Size | 32-33 bytes | 32-33 bytes | 48 or 96 bytes |
+| Signing Speed | Fast | Fast | Moderate |
+| Verification Speed | Fast | Fast | Slow (pairings) |
+| Aggregation | Linear | No | Yes (efficient) |
+| Deterministic | Yes | Optional | Yes |
+| Standards | BIP-340 | FIPS 186-5 | Draft IETF |
+| Quantum Resistant | No | No | No |
+
+## Security Considerations
+
+### Schnorr
+
+- **Nonce Generation**: Must be unpredictable (use RFC 6979)
+- **Public Key Validation**: Verify point is on curve and in correct subgroup
+- **Multi-signatures**: Requires MuSig2 protocol to prevent rogue key attacks
+
+### ECDSA
+
+- **Nonce Reuse**: FATAL - reveals private key
+- **Nonce Bias**: Lattice attacks can recover key from biased nonces
+- **Message Hashing**: Always hash messages before signing
+- **Signature Malleability**: `(r, s)` and `(r, -s)` both valid
+
+### BLS
+
+- **Pairing Security**: Requires ~256-bit curve for 128-bit security
+- **Subgroup Checks**: Verify signatures are in correct subgroup
+- **Rogue Key Attacks**: Must use POP or message augmentation
+- **Distinct Messages**: Basic scheme requires all messages different
+
+## Performance Benchmarks
+
+Approximate times on modern CPUs:
+
+| Operation | Schnorr (secp256k1) | ECDSA (secp256k1) | BLS (BLS12-381) |
+|-----------|---------------------|-------------------|------------------|
+| Key Generation | 0.1 ms | 0.1 ms | 0.1 ms |
+| Signing | 0.1 ms | 0.1 ms | 0.5 ms |
+| Verification | 0.15 ms | 0.15 ms | 2.0 ms |
+| Aggregate (n=100) | - | - | 50 ms |
+| Agg Verify (n=100) | - | - | 4 ms |
+
+## Related
+
+- [Hashing](/api/primitives/hashing) - For message digests
+- [Commitments](/api/primitives/commitments) - For hiding values
+- [Encryption](/api/primitives/encryption) - For confidentiality

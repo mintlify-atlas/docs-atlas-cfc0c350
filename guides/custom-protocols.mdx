@@ -1,0 +1,552 @@
+---
+title: 'Building Custom Protocols'
+description: 'Guide to implementing custom MPC protocols with Bron Crypto primitives'
+---
+
+## Overview
+
+Bron Crypto provides a rich set of cryptographic primitives that can be composed to build custom multi-party computation (MPC) protocols. This guide covers the building blocks and patterns for creating your own protocols.
+
+## Core Building Blocks
+
+### 1. Sigma Protocols
+
+Sigma protocols are three-round proof systems that can be composed and compiled into non-interactive proofs.
+
+#### Available Sigma Protocols
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/proofs/dlog/schnorr"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/okamoto"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/paillier/nthroot"
+)
+
+// Schnorr proof of discrete log knowledge
+// Proves: I know x such that Y = g^x
+prover := schnorr.NewProver(group, witness, public)
+commitment := prover.Commit()
+challenge := prover.Challenge()
+response := prover.Respond()
+
+// Verifier checks the proof
+verifier := schnorr.NewVerifier(group, public)
+valid := verifier.Verify(commitment, challenge, response)
+```
+
+#### Composing Sigma Protocols
+
+Bron Crypto supports AND and OR composition:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compose/sigand"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compose/sigor"
+)
+
+// AND composition: Prove knowledge of both x1 AND x2
+// Y1 = g^x1 AND Y2 = g^x2
+andProver := sigand.NewProver(prover1, prover2)
+
+// OR composition: Prove knowledge of x1 OR x2 (but not which one)
+orProver := sigor.NewProver(prover1, prover2, whichBranch)
+```
+
+<Tip>
+OR composition allows you to prove knowledge of a secret without revealing which secret you know - useful for anonymous credentials and ring signatures.
+</Tip>
+
+#### Non-Interactive Compilation
+
+Convert interactive sigma protocols to non-interactive using different compilers:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compiler/fiatshamir"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compiler/fischlin"
+)
+
+// Fiat-Shamir: Hash-based, efficient, ROM security
+fsCompiler := fiatshamir.NewCompiler(hashFunc)
+niProof := fsCompiler.Compile(prover)
+
+// Fischlin: More complex, standard model security
+fischlinCompiler := fischlin.NewCompiler(params)
+niProof := fischlinCompiler.Compile(prover)
+```
+
+| Compiler | Security Model | Efficiency | Use Case |
+|----------|---------------|------------|----------|
+| Fiat-Shamir | Random Oracle | High | General purpose |
+| Fischlin | Standard Model | Medium | High security requirements |
+| Randomised Fischlin | Standard Model | Medium | Specific protocols |
+
+### 2. Secret Sharing
+
+Implement access structures for distributed computation:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/mpc/sharing"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/sharing/accessstructures/threshold"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/sharing/accessstructures/boolexpr"
+)
+
+// Threshold access structure: t-of-n
+shareholders := sharing.NewOrdinalShareholderSet(5)
+thresholdAC, err := threshold.NewThresholdAccessStructure(3, shareholders)
+
+// Check if a set is authorized
+quorum := hashset.NewComparable[sharing.ID]()
+quorum.Add(sharing.ID(1))
+quorum.Add(sharing.ID(2))
+quorum.Add(sharing.ID(3))
+authorized := thresholdAC.IsAuthorized(quorum.Freeze()) // true
+
+// Boolean expression access structures
+// Example: (Alice AND Bob) OR (Charlie AND Dave AND Eve)
+expr := boolexpr.Or(
+    boolexpr.And(
+        boolexpr.Leaf("Alice"),
+        boolexpr.Leaf("Bob"),
+    ),
+    boolexpr.And(
+        boolexpr.Leaf("Charlie"),
+        boolexpr.Leaf("Dave"),
+        boolexpr.Leaf("Eve"),
+    ),
+)
+boolAC := boolexpr.NewAccessStructure(expr, shareholders)
+```
+
+<Note>
+**Shamir Secret Sharing** is used internally for threshold schemes. The library provides both threshold and general monotone access structures via boolean expressions.
+</Note>
+
+### 3. Commitments
+
+Multiple commitment schemes are available:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/commitments/pedersen"
+    "github.com/bronlabs/bron-crypto/pkg/commitments/hash"
+)
+
+// Pedersen commitment (perfectly hiding, computationally binding)
+pedersenParams := pedersen.GenerateParams(group)
+commitment, opening := pedersenParams.Commit(secret)
+valid := pedersenParams.Verify(commitment, secret, opening)
+
+// Hash commitment (computationally hiding and binding)
+hashCommitment, hashOpening := hash.Commit(data, prng)
+valid := hash.Verify(hashCommitment, data, hashOpening)
+```
+
+### 4. Network Coordination
+
+The network package provides transport-agnostic message routing:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/network"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/sharing"
+)
+
+// Implement the Delivery interface for your transport
+type MyDelivery struct {
+    partyID sharing.ID
+    quorum  []sharing.ID
+    // ... your transport code
+}
+
+func (d *MyDelivery) PartyID() sharing.ID { return d.partyID }
+func (d *MyDelivery) Quorum() []sharing.ID { return d.quorum }
+func (d *MyDelivery) Send(to sharing.ID, message []byte) error { /* ... */ }
+func (d *MyDelivery) Receive() (from sharing.ID, message []byte, err error) { /* ... */ }
+
+// Create router for correlation-aware routing
+router := network.NewRouter(delivery)
+
+// Send and receive with correlation IDs
+err := router.SendTo("round1", messages)
+responses, err := router.ReceiveFrom("round1", party1, party2, party3)
+```
+
+## Pattern: Multi-Round Protocol
+
+Here's a template for building a multi-round MPC protocol:
+
+```go
+package myprotocol
+
+import (
+    "github.com/bronlabs/bron-crypto/pkg/network"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/sharing"
+)
+
+// Participant holds the state for one party in the protocol
+type Participant struct {
+    sharingID sharing.ID
+    quorum    network.Quorum
+    
+    // Protocol-specific state
+    privateInput []byte
+    commitment   []byte
+    received     map[sharing.ID]*Round1Message
+}
+
+// Round1Message defines the message structure for round 1
+type Round1Message struct {
+    Commitment []byte `cbor:"commitment"`
+}
+
+type Round2Message struct {
+    Opening []byte `cbor:"opening"`
+    Share   []byte `cbor:"share"`
+}
+
+// NewParticipant creates a new participant
+func NewParticipant(
+    id sharing.ID,
+    quorum network.Quorum,
+    input []byte,
+) (*Participant, error) {
+    // Validate inputs
+    if !quorum.Contains(id) {
+        return nil, errs.New("participant not in quorum")
+    }
+    
+    return &Participant{
+        sharingID:    id,
+        quorum:       quorum,
+        privateInput: input,
+        received:     make(map[sharing.ID]*Round1Message),
+    }, nil
+}
+
+// Round1 executes the first round of the protocol
+func (p *Participant) Round1() (network.OutgoingBroadcast[*Round1Message], error) {
+    // Create commitment to private input
+    commitment, opening := hash.Commit(p.privateInput, prng)
+    p.commitment = commitment
+    p.opening = opening
+    
+    // Broadcast commitment to all parties
+    msg := &Round1Message{
+        Commitment: commitment,
+    }
+    
+    return network.BroadcastMessage(p.quorum, msg), nil
+}
+
+// Round2 processes round 1 messages and executes round 2
+func (p *Participant) Round2(
+    r1Messages network.RoundMessages[*Round1Message],
+) (network.OutgoingBroadcast[*Round2Message], error) {
+    // Validate we received from all expected parties
+    for id := range p.quorum.Iter() {
+        if id == p.sharingID {
+            continue
+        }
+        if _, ok := r1Messages.Get(id); !ok {
+            return nil, errs.New("missing message from party").WithTag("party", id)
+        }
+    }
+    
+    // Store received messages
+    for id, msg := range r1Messages.Iter() {
+        p.received[id] = msg
+    }
+    
+    // Open commitments
+    msg := &Round2Message{
+        Opening: p.opening,
+        Share:   p.privateInput,
+    }
+    
+    return network.BroadcastMessage(p.quorum, msg), nil
+}
+
+// Finalize processes round 2 messages and produces output
+func (p *Participant) Finalize(
+    r2Messages network.RoundMessages[*Round2Message],
+) ([]byte, error) {
+    // Verify all commitments
+    for id, r1msg := range p.received {
+        if id == p.sharingID {
+            continue
+        }
+        
+        r2msg, ok := r2Messages.Get(id)
+        if !ok {
+            return nil, errs.New("missing round 2 message").WithTag("party", id)
+        }
+        
+        // Verify commitment opening
+        if !hash.Verify(r1msg.Commitment, r2msg.Share, r2msg.Opening) {
+            return nil, errs.New("invalid commitment opening").WithTag("party", id)
+        }
+    }
+    
+    // Combine shares to produce output
+    output := combineShares(r2Messages)
+    return output, nil
+}
+```
+
+<Steps>
+
+<Step title="Define Message Types">
+Create CBOR-serializable structs for each round's messages with appropriate tags.
+</Step>
+
+<Step title="Implement Participant State">
+Track protocol state, received messages, and intermediate values in the Participant struct.
+</Step>
+
+<Step title="Create Round Methods">
+Each round method takes previous round's messages as input and returns outgoing messages.
+</Step>
+
+<Step title="Add Validation">
+Always validate:
+- Messages received from expected parties
+- Cryptographic proofs and commitments
+- Authorization of parties
+</Step>
+
+<Step title="Handle Errors with Tags">
+Use error tags to enable identifiable abort when malicious parties are detected.
+</Step>
+
+</Steps>
+
+## Example: Echo Broadcast Protocol
+
+Here's a real example from the library - a 3-round echo broadcast that ensures all honest parties receive the same message:
+
+```go
+package echo
+
+import (
+    "bytes"
+    "github.com/bronlabs/bron-crypto/pkg/network"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/sharing"
+)
+
+type Participant[B any] struct {
+    sharingID sharing.ID
+    quorum    network.Quorum
+    state     struct {
+        messages map[sharing.ID][]byte
+    }
+}
+
+// Round1 broadcasts the sender's message to all other parties
+func (p *Participant[B]) Round1(message B) (network.OutgoingUnicasts[*Round1P2P], error) {
+    serialized, err := serde.MarshalCBOR(message)
+    if err != nil {
+        return nil, errs.Wrap(err)
+    }
+    
+    // Send to all other parties
+    r1 := hashmap.NewComparable[sharing.ID, *Round1P2P]()
+    for id := range p.quorum.Iter() {
+        if id == p.sharingID {
+            continue
+        }
+        r1.Put(id, &Round1P2P{Payload: serialized})
+    }
+    
+    // Store our own message
+    p.state.messages[p.sharingID] = serialized
+    return r1.Freeze(), nil
+}
+
+// Round2 echoes every received payload back to all parties
+func (p *Participant[B]) Round2(
+    r1 network.RoundMessages[*Round1P2P],
+) (network.OutgoingUnicasts[*Round2P2P], error) {
+    receivedMessages := make(map[sharing.ID][]byte)
+    
+    // Collect all messages
+    for id := range p.quorum.Iter() {
+        if id == p.sharingID {
+            continue
+        }
+        m, ok := r1.Get(id)
+        if !ok {
+            return nil, ErrFailed.WithMessage("missing message")
+        }
+        receivedMessages[id] = m.Payload
+        p.state.messages[id] = m.Payload
+    }
+    
+    // Echo all messages to all parties
+    r2 := hashmap.NewComparable[sharing.ID, *Round2P2P]()
+    for id := range p.quorum.Iter() {
+        if id == p.sharingID {
+            continue
+        }
+        r2.Put(id, &Round2P2P{Echo: receivedMessages})
+    }
+    
+    return r2.Freeze(), nil
+}
+
+// Round3 validates echo consistency and outputs the agreed messages
+func (p *Participant[B]) Round3(
+    r2 network.RoundMessages[*Round2P2P],
+) (network.RoundMessages[B], error) {
+    // Verify all echoes match
+    for id := range p.quorum.Iter() {
+        if id == p.sharingID {
+            continue
+        }
+        
+        message := p.state.messages[id]
+        
+        // Check that everyone echoed the same message
+        for echoID := range p.quorum.Iter() {
+            if echoID == p.sharingID || echoID == id {
+                continue
+            }
+            
+            echo, ok := r2.Get(echoID)
+            if !ok {
+                return nil, ErrFailed.WithMessage("missing message")
+            }
+            
+            echoMessage := echo.Echo[id]
+            if !bytes.Equal(message, echoMessage) {
+                return nil, ErrFailed.WithMessage("mismatched echo")
+            }
+        }
+    }
+    
+    // All echoes consistent, deserialize and return
+    r3 := hashmap.NewComparable[sharing.ID, B]()
+    for id := range p.quorum.Iter() {
+        if id == p.sharingID {
+            continue
+        }
+        message, err := serde.UnmarshalCBOR[B](p.state.messages[id])
+        if err != nil {
+            return nil, errs.Wrap(err)
+        }
+        r3.Put(id, message)
+    }
+    
+    return r3.Freeze(), nil
+}
+```
+
+<Note>
+**Echo Broadcast Properties:**
+- Ensures all honest parties deliver the same payload
+- Detects inconsistencies through two rounds of echoing
+- Suitable for small-group MPC setups (O(n²) communication)
+</Note>
+
+## Advanced: Zero-Knowledge Proofs
+
+Build complex ZK proofs using the modular sigma protocol system:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compiler/zk"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/dlog/schnorr"
+)
+
+// Create a zero-knowledge proof compiler
+zkCompiler := zk.NewCompiler(fiatshamirCompiler)
+
+// Build a proof that's both sound and zero-knowledge
+prover := schnorr.NewProver(group, witness, public)
+zkProof := zkCompiler.Compile(prover)
+
+// The proof reveals nothing about the witness
+verifier := schnorr.NewVerifier(group, public)
+valid := verifier.VerifyNonInteractive(zkProof)
+```
+
+## Testing Custom Protocols
+
+Use the test utilities to simulate multi-party execution:
+
+```go
+import (
+    "testing"
+    "github.com/bronlabs/bron-crypto/pkg/network/testutils"
+)
+
+func TestMyProtocol(t *testing.T) {
+    // Setup parties
+    ids := sharing.NewOrdinalShareholderSet(3)
+    parties := make([]*MyParticipant, 0)
+    
+    for id := range ids.Iter() {
+        p, err := NewMyParticipant(id, ids)
+        require.NoError(t, err)
+        parties = append(parties, p)
+    }
+    
+    // Round 1
+    r1Outputs := make(map[sharing.ID]network.OutgoingBroadcast[*Round1Message])
+    for _, p := range parties {
+        r1Outputs[p.SharingID()], err = p.Round1()
+        require.NoError(t, err)
+    }
+    
+    // Map outputs to inputs
+    r1Inputs := testutils.MapBroadcastO2I(t, parties, r1Outputs)
+    
+    // Round 2
+    r2Outputs := make(map[sharing.ID]network.OutgoingBroadcast[*Round2Message])
+    for _, p := range parties {
+        r2Outputs[p.SharingID()], err = p.Round2(r1Inputs[p.SharingID()])
+        require.NoError(t, err)
+    }
+    
+    // Continue for remaining rounds...
+}
+```
+
+## Best Practices
+
+<Warning>
+**Security Considerations:**
+
+1. **Always use fresh randomness** - Never reuse nonces or randomness across protocol executions
+2. **Validate all inputs** - Check message authenticity and party authorization
+3. **Implement identifiable abort** - Use error tags to identify malicious parties
+4. **Session isolation** - Use unique session IDs for each protocol execution
+5. **Test with malicious parties** - Include tests with corrupted messages
+</Warning>
+
+<Tip>
+**Performance Tips:**
+
+1. **Batch operations** - Use batch proofs (e.g., `batch_schnorr`) when proving multiple statements
+2. **Precomputation** - Compute commitments and proofs in parallel before communication rounds
+3. **Minimize rounds** - Fewer rounds generally means better performance in high-latency networks
+4. **Use appropriate commitments** - Hash commitments are faster than Pedersen when hiding isn't critical
+</Tip>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Networking Guide" icon="network-wired" href="/guides/networking">
+    Deep dive into network coordination patterns
+  </Card>
+  <Card title="Sigma Protocols" icon="shield-alt" href="/api/proofs/sigma-protocols">
+    Complete sigma protocol API reference
+  </Card>
+  <Card title="Commitment Schemes" icon="lock" href="/api/primitives/commitments">
+    Explore commitment scheme implementations
+  </Card>
+  <Card title="Examples" icon="code" href="https://github.com/bronlabs/bron-crypto/tree/main/pkg">
+    Browse protocol implementations in the repository
+  </Card>
+</CardGroup>

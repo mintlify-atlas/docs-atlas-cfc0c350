@@ -1,0 +1,340 @@
+---
+title: 'Protocol Composition'
+description: 'Compose Sigma protocols with AND and OR logic'
+---
+
+## Overview
+
+The composition package provides two fundamental building blocks for creating complex zero-knowledge proofs: AND composition (prove knowledge of all witnesses) and OR composition (prove knowledge of at least one witness).
+
+## AND Composition
+
+AND composition allows proving knowledge of witnesses for all n statements simultaneously. All sub-protocols receive the same challenge from the verifier.
+
+### Creating an AND Composition
+
+```go pkg/proofs/sigma/compose/sigand/and.go
+func Compose[
+    X sigma.Statement,
+    W sigma.Witness,
+    A sigma.Commitment,
+    S sigma.State,
+    Z sigma.Response,
+](
+    p sigma.Protocol[X, W, A, S, Z],
+    count uint,
+) (sigma.Protocol[Statement[X], Witness[W], Commitment[A], State[S], Response[Z]], error)
+```
+
+<ParamField path="p" type="Protocol[X, W, A, S, Z]">
+  The base Sigma protocol to compose (same protocol used for all statements)
+</ParamField>
+
+<ParamField path="count" type="uint">
+  Number of statements to compose (must be positive)
+</ParamField>
+
+### Composed Types
+
+```go pkg/proofs/sigma/compose/sigand/and.go
+// Statement represents an n-way AND-composed statement
+type Statement[X sigma.Statement] []X
+
+// Witness represents an n-way AND-composed witness
+// Every witness must be valid for its corresponding statement
+type Witness[W sigma.Witness] []W
+
+// Commitment represents the prover's commitments for all branches
+type Commitment[A sigma.Commitment] []A
+
+// State holds the prover's internal states for all branches
+type State[S sigma.State] []S
+
+// Response contains the prover's responses for all branches
+// Each element is computed using the same verifier challenge
+type Response[Z sigma.Response] []Z
+```
+
+### Helper Functions
+
+```go pkg/proofs/sigma/compose/sigand/and.go
+// ComposeStatements creates an AND-composed statement
+func ComposeStatements[X sigma.Statement](statements ...X) Statement[X]
+
+// ComposeWitnesses creates an AND-composed witness
+func ComposeWitnesses[W sigma.Witness](witnesses ...W) Witness[W]
+```
+
+### Usage Example
+
+```go
+import (
+    "io"
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+    "github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/dlog/schnorr"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compose/sigand"
+)
+
+func andCompositionExample() error {
+    prng := pcg.NewRandomised()
+    curve := k256.NewCurve()
+    base, _ := curve.Random(prng)
+    
+    // Create base protocol
+    protocol, _ := schnorr.NewProtocol(base, prng)
+    
+    // Compose 3-way AND
+    count := uint(3)
+    andProtocol, _ := sigand.Compose(protocol, count)
+    
+    // Create statements and witnesses - ALL must be valid
+    statements := make(sigand.Statement[*schnorr.Statement[*k256.Point, *k256.Scalar]], count)
+    witnesses := make(sigand.Witness[*schnorr.Witness[*k256.Scalar]], count)
+    
+    for i := range count {
+        w, _ := curve.ScalarField().Random(prng)
+        x := base.ScalarMul(w)
+        statements[i] = schnorr.NewStatement(x)
+        witnesses[i] = schnorr.NewWitness(w)
+    }
+    
+    // Validate all statements
+    err := andProtocol.ValidateStatement(statements, witnesses)
+    if err != nil {
+        return err
+    }
+    
+    // Generate commitment
+    commitment, state, _ := andProtocol.ComputeProverCommitment(statements, witnesses)
+    
+    // Sample challenge
+    challenge := make([]byte, andProtocol.GetChallengeBytesLength())
+    io.ReadFull(prng, challenge)
+    
+    // Generate response
+    response, _ := andProtocol.ComputeProverResponse(statements, witnesses, commitment, state, challenge)
+    
+    // Verify - all branches must verify
+    return andProtocol.Verify(statements, commitment, challenge, response)
+}
+```
+
+### Security Properties
+
+**Completeness**: If all witnesses are valid, the proof will verify.
+
+**Soundness**: The composed protocol inherits the soundness of the base protocol. A valid proof demonstrates knowledge of all n witnesses.
+
+**Zero-Knowledge**: The simulator can produce transcripts for all branches without knowing any witnesses.
+
+## OR Composition
+
+OR composition allows proving knowledge of a witness for at least one of n statements without revealing which one. This uses the XOR technique where branch challenges XOR to the verifier's challenge.
+
+### Creating an OR Composition
+
+```go pkg/proofs/sigma/compose/sigor/or.go
+func Compose[
+    X sigma.Statement,
+    W sigma.Witness,
+    A sigma.Commitment,
+    S sigma.State,
+    Z sigma.Response,
+](
+    p sigma.Protocol[X, W, A, S, Z],
+    count uint,
+    prng io.Reader,
+) (sigma.Protocol[Statement[X], Witness[W], Commitment[A], *State[S, Z], *Response[Z]], error)
+```
+
+<ParamField path="p" type="Protocol[X, W, A, S, Z]">
+  The base Sigma protocol to compose
+</ParamField>
+
+<ParamField path="count" type="uint">
+  Number of branches (must be ≥ 2)
+</ParamField>
+
+<ParamField path="prng" type="io.Reader">
+  Cryptographically secure random number generator for challenge simulation
+</ParamField>
+
+### Composed Types
+
+```go pkg/proofs/sigma/compose/sigor/or.go
+// Statement represents an OR-composed statement
+type Statement[X sigma.Statement] []X
+
+// Witness represents an OR-composed witness
+type Witness[W sigma.Witness] struct {
+    v W  // The actual witness (valid for at least one statement)
+}
+
+// Commitment represents OR-composed commitments (one per branch)
+type Commitment[A sigma.Commitment] []A
+
+// State holds the prover's internal state
+type State[S sigma.State, Z sigma.Response] struct {
+    B uint       // Index of the branch with valid witness
+    S []S        // Prover states (only S[B] is meaningful)
+    E [][]byte   // Simulated challenges for false branches
+    Z []Z        // Simulated responses for false branches
+}
+
+// Response represents the prover's response
+type Response[Z sigma.Response] struct {
+    E [][]byte   // Challenges satisfying XOR constraint
+    Z []Z        // Responses for each branch
+}
+```
+
+### Helper Functions
+
+```go pkg/proofs/sigma/compose/sigor/or.go
+// ComposeStatements creates an OR-composed statement
+func ComposeStatements[X sigma.Statement](statements ...X) Statement[X]
+
+// NewWitness creates a witness containing the valid witness
+func NewWitness[W sigma.Witness](witness W) Witness[W]
+```
+
+### Usage Example
+
+```go
+import (
+    "io"
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+    "github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/dlog/schnorr"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compose/sigor"
+)
+
+func orCompositionExample() error {
+    prng := pcg.NewRandomised()
+    curve := k256.NewCurve()
+    base, _ := curve.Random(prng)
+    
+    // Create base protocol
+    protocol, _ := schnorr.NewProtocol(base, prng)
+    
+    // Compose 3-way OR
+    count := uint(3)
+    orProtocol, _ := sigor.Compose(protocol, count, prng)
+    
+    // Create statements (only need witness for ONE)
+    statements := make(sigor.Statement[*schnorr.Statement[*k256.Point, *k256.Scalar]], count)
+    
+    // First statement - we know the witness
+    validWitness, _ := curve.ScalarField().Random(prng)
+    statements[0] = schnorr.NewStatement(base.ScalarMul(validWitness))
+    
+    // Other statements - random (no witness)
+    statements[1] = schnorr.NewStatement(curve.Generator())
+    statements[2], _ = curve.Random(prng)
+    statements[2] = schnorr.NewStatement(statements[2])
+    
+    // Witness for the first statement
+    witness := sigor.NewWitness(schnorr.NewWitness(validWitness))
+    
+    // Generate commitment (simulates false branches)
+    commitment, state, _ := orProtocol.ComputeProverCommitment(statements, witness)
+    
+    // Sample challenge
+    challenge := make([]byte, orProtocol.GetChallengeBytesLength())
+    io.ReadFull(prng, challenge)
+    
+    // Generate response
+    response, _ := orProtocol.ComputeProverResponse(statements, witness, commitment, state, challenge)
+    
+    // Verify - checks XOR constraint and all transcripts
+    return orProtocol.Verify(statements, commitment, challenge, response)
+}
+```
+
+### XOR Constraint
+
+OR composition enforces the constraint:
+
+```
+e₀ ⊕ e₁ ⊕ ... ⊕ eₙ₋₁ = e
+```
+
+where `e` is the verifier's challenge and `eᵢ` are the branch challenges. This ensures the prover cannot choose all challenges freely.
+
+### Security Properties
+
+**Completeness**: If the witness is valid for at least one statement, the proof will verify.
+
+**Soundness**: A valid proof demonstrates knowledge of a witness for at least one statement, but doesn't reveal which one.
+
+**Zero-Knowledge**: The verifier learns nothing about which branch has the valid witness. All branches appear equally valid.
+
+## Combining AND and OR
+
+You can nest compositions to create complex predicates:
+
+```go
+// Prove: (x₀ AND x₁) OR (x₂ AND x₃)
+// First compose pairs with AND
+and1, _ := sigand.Compose(protocol, 2)
+and2, _ := sigand.Compose(protocol, 2)
+
+// Then compose the AND results with OR
+// Note: This requires careful type handling
+```
+
+## Protocol Names
+
+Composed protocols have descriptive names:
+
+```go
+// AND composition
+andProtocol.Name()  // Returns: "(Schnorr)^3" for 3-way AND
+
+// OR composition  
+orProtocol.Name()   // Returns: "SigmaOR(Schnorr)^3" for 3-way OR
+```
+
+## Performance Considerations
+
+### Parallelization
+
+Both AND and OR compositions use goroutines to parallelize operations:
+
+- **AND**: All branches execute in parallel
+- **OR**: Simulator runs in parallel for false branches
+
+This provides significant speedup for large compositions.
+
+### Proof Size
+
+**AND composition**: Proof size scales linearly with the number of branches (n commitments, n responses).
+
+**OR composition**: Proof size also scales linearly but includes additional challenge data (n commitments, n challenges, n responses).
+
+## Error Handling
+
+```go
+var (
+    // ErrIsNil indicates a nil argument
+    ErrIsNil = errs.New("is nil")
+    
+    // ErrInvalidArgument indicates an invalid argument value
+    ErrInvalidArgument = errs.New("invalid argument")
+    
+    // ErrInvalidLength indicates incorrect slice length
+    ErrInvalidLength = errs.New("invalid length")
+    
+    // ErrNotAtLeastOneOutOfN indicates no valid witness (OR only)
+    ErrNotAtLeastOneOutOfN = errs.New("not at least one statement out of n is valid")
+    
+    // ErrVerification indicates verification failure
+    ErrVerification = errs.New("verification failed")
+)
+```
+
+## Related Documentation
+
+- [Sigma Protocols](/api/proofs/sigma-protocols) - The base protocol interface
+- [Compilers](/api/proofs/compilers) - Compile composed protocols to non-interactive proofs

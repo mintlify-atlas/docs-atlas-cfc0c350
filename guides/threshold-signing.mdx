@@ -1,0 +1,436 @@
+---
+title: 'Threshold Signing Workflow'
+description: 'Complete guide to implementing threshold signatures with Bron Crypto'
+---
+
+## Overview
+
+Threshold signing allows multiple parties to jointly create a signature without any single party having access to the complete private key. Bron Crypto implements state-of-the-art threshold signing protocols for Schnorr, ECDSA, and BLS signatures.
+
+<Note>
+The threshold signing packages have been audited by [Trail of Bits](https://github.com/trailofbits/publications#cryptography-reviews). The audit report is available in the repository's `audits/` directory.
+</Note>
+
+## Supported Protocols
+
+Bron Crypto supports three main threshold signature schemes:
+
+- **Threshold Schnorr** - [Lindell22](https://eprint.iacr.org/2022/374) protocol
+- **Threshold ECDSA** - [DKLs23](https://eprint.iacr.org/2023/765) and [Lindell17](https://eprint.iacr.org/2017/552) protocols
+- **Threshold BLS** - [Boldyreva02](https://link.springer.com/chapter/10.1007/3-540-36288-6_3) protocol
+
+## Complete Example: Threshold Schnorr with Lindell22
+
+This example demonstrates the complete workflow for threshold Schnorr signing using the Lindell22 protocol.
+
+<Steps>
+
+<Step title="Setup Access Structure">
+
+First, define the threshold parameters and shareholders:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+    "github.com/bronlabs/bron-crypto/pkg/base/datastructures/hashset"
+    "github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/dkg/gennaro"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/sharing"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/sharing/accessstructures/threshold"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22/signing"
+    "github.com/bronlabs/bron-crypto/pkg/signatures/schnorrlike/bip340"
+)
+
+// Define threshold parameters: 3-of-5
+thresh := uint(3)
+total := uint(5)
+
+// Create shareholders set
+shareholders := sharing.NewOrdinalShareholderSet(total)
+
+// Create access structure
+ac, err := threshold.NewThresholdAccessStructure(thresh, shareholders)
+if err != nil {
+    panic(err)
+}
+```
+
+</Step>
+
+<Step title="Run Distributed Key Generation (DKG)">
+
+Use the Gennaro DKG protocol to generate distributed key shares:
+
+```go
+// Initialize curve and PRNG
+group := k256.NewCurve()
+prng := pcg.NewRandomised()
+
+// Create DKG participants
+parties := make(map[sharing.ID]*gennaro.Participant[*k256.Point, *k256.Scalar])
+for id := range shareholders.Iter() {
+    // Create session context for each party
+    ctx := session_testutils.MakeRandomContext(shareholders, prng)
+    
+    p, err := gennaro.NewParticipant(
+        ctx,
+        group,
+        ac,
+        fiatshamir.Name, // Use Fiat-Shamir compiler
+        prng,
+    )
+    if err != nil {
+        panic(err)
+    }
+    parties[id] = p
+}
+
+// Execute DKG rounds (orchestration details omitted for brevity)
+// This produces a shard for each party containing their secret share
+// and public verification material
+```
+
+<Note>
+The DKG protocol runs in 3 rounds:
+1. **Pedersen Deal** - Each party deals a Pedersen VSS instance
+2. **Feldman Lift** - Parties send shares and broadcast verification vectors
+3. **Verify & Aggregate** - Parties verify proofs and aggregate shares
+</Note>
+
+</Step>
+
+<Step title="Create Signing Session">
+
+Select a quorum of parties to participate in signing:
+
+```go
+// Select a quorum (any thresh or more parties)
+quorumSet := hashset.NewComparable[sharing.ID]()
+for i := range thresh {
+    quorumSet.Add(sharing.ID(i + 1))
+}
+quorum := quorumSet.Freeze()
+
+// Create BIP340 Schnorr scheme
+scheme, err := bip340.NewScheme(prng)
+if err != nil {
+    panic(err)
+}
+
+// Create cosigners for each party in the quorum
+cosigners := make(map[sharing.ID]*signing.Cosigner[*k256.Point, *k256.Scalar, []byte])
+for id := range quorum.Iter() {
+    shard := shards[id] // From DKG output
+    
+    // Create signing context for this quorum
+    signCtx, err := dkgCtxs[id].SubContext(quorum)
+    if err != nil {
+        panic(err)
+    }
+    
+    cosigner, err := signing.NewCosigner(
+        signCtx,
+        shard,
+        scheme.Variant(),
+        prng,
+    )
+    if err != nil {
+        panic(err)
+    }
+    cosigners[id] = cosigner
+}
+```
+
+</Step>
+
+<Step title="Execute 3-Round Signing Protocol">
+
+The Lindell22 protocol runs in 3 rounds with identifiable abort:
+
+```go
+message := []byte("Hello, threshold signatures!")
+
+// Round 1: Commitment phase
+r1Outputs := make(map[sharing.ID]network.OutgoingBroadcast[*signing.Round1Broadcast])
+for id, cosigner := range cosigners {
+    r1Out, err := cosigner.Round1()
+    if err != nil {
+        panic(err)
+    }
+    r1Outputs[id] = r1Out
+}
+
+// Map broadcast outputs to inputs
+r2Inputs := MapBroadcastO2I(cosigners, r1Outputs)
+
+// Round 2: Share commitments
+r2Outputs := make(map[sharing.ID]network.OutgoingBroadcast[*signing.Round2Broadcast])
+for id, cosigner := range cosigners {
+    r2Out, err := cosigner.Round2(r2Inputs[id])
+    if err != nil {
+        panic(err)
+    }
+    r2Outputs[id] = r2Out
+}
+
+// Map broadcast outputs to inputs
+r3Inputs := MapBroadcastO2I(cosigners, r2Outputs)
+
+// Round 3: Produce partial signatures
+partialSigs := make(map[sharing.ID]*lindell22.PartialSignature[*k256.Point, *k256.Scalar])
+for id, cosigner := range cosigners {
+    psig, err := cosigner.Round3(r3Inputs[id], message)
+    if err != nil {
+        // Check for identifiable abort
+        if culprit, ok := errs.HasTag(err, base.IdentifiableAbortPartyIDTag); ok {
+            log.Printf("Party %v produced invalid signature", culprit)
+        }
+        panic(err)
+    }
+    partialSigs[id] = psig
+}
+```
+
+<Warning>
+The Lindell22 protocol provides **identifiable abort** - if a malicious party produces an invalid signature, they can be identified. Always check for the `IdentifiableAbortPartyIDTag` error tag.
+</Warning>
+
+</Step>
+
+<Step title="Aggregate Partial Signatures">
+
+Combine partial signatures into a complete threshold signature:
+
+```go
+// Get public key material from any shard
+publicMaterial := cosigners[sharing.ID(1)].Shard().PublicKeyMaterial()
+
+// Create aggregator
+aggregator, err := signing.NewAggregator(publicMaterial, scheme)
+if err != nil {
+    panic(err)
+}
+
+// Convert map to immutable hashmap
+partialSigsMap := hashmap.NewComparableFromNativeLike(partialSigs).Freeze()
+
+// Aggregate partial signatures
+signature, err := aggregator.Aggregate(partialSigsMap, message)
+if err != nil {
+    // The aggregator verifies each partial signature
+    // and will identify any malicious parties
+    panic(err)
+}
+```
+
+</Step>
+
+<Step title="Verify the Signature">
+
+Verify the final signature using standard verification:
+
+```go
+// Get verifier from scheme
+verifier, err := scheme.Verifier()
+if err != nil {
+    panic(err)
+}
+
+// Verify signature
+err = verifier.Verify(signature, publicMaterial.PublicKey(), message)
+if err != nil {
+    panic(err) // Signature is invalid
+}
+
+log.Println("✓ Threshold signature verified successfully!")
+```
+
+</Step>
+
+</Steps>
+
+## Threshold BLS Example
+
+BLS signatures are particularly efficient for threshold schemes. Here's a complete example:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/pairable/bls12381"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tbls/boldyreva02/signing"
+    "github.com/bronlabs/bron-crypto/pkg/signatures/bls"
+)
+
+// Setup with BLS12-381 curve (short key variant)
+group := bls12381.NewG1()
+curveFamily := &bls12381.FamilyTrait{}
+
+// Run DKG (similar to Schnorr example)
+// ...
+
+// Create cosigners for BLS
+cosigners := make([]*signing.Cosigner[...])
+for id := range quorum.Iter() {
+    cosigner, err := signing.NewShortKeyCosigner(
+        signCtx,
+        curveFamily,
+        shards[id],
+        bls.Basic, // Rogue key prevention algorithm
+    )
+    if err != nil {
+        panic(err)
+    }
+    cosigners = append(cosigners, cosigner)
+}
+
+// Produce partial signatures (single round!)
+message := []byte("Hello, BLS threshold!")
+partialSigs := make(map[sharing.ID]*boldyreva02.PartialSignature[...])
+for _, cosigner := range cosigners {
+    psig, err := cosigner.ProducePartialSignature(message)
+    if err != nil {
+        panic(err)
+    }
+    partialSigs[cosigner.SharingID()] = psig
+}
+
+// Aggregate
+aggregator, err := signing.NewShortKeyAggregator(
+    curveFamily,
+    &publicMaterial,
+    bls.Basic,
+)
+if err != nil {
+    panic(err)
+}
+
+signature, err := aggregator.Aggregate(
+    hashmap.NewComparableFromNativeLike(partialSigs).Freeze(),
+    message,
+)
+if err != nil {
+    panic(err)
+}
+
+// Verify
+scheme, err := bls.NewShortKeyScheme(curveFamily, bls.Basic)
+verifier, err := scheme.Verifier()
+err = verifier.Verify(signature, publicMaterial.PublicKey(), message)
+```
+
+<Tip>
+**BLS Advantages:**
+- Only 1 round of communication (vs 3 for Schnorr/ECDSA)
+- Signature aggregation is simple addition
+- Multiple rogue key prevention modes: Basic, MessageAugmentation, POP
+</Tip>
+
+## Performance Considerations
+
+### Protocol Comparison
+
+| Protocol | Rounds | Communication | Proof System | Identifiable Abort |
+|----------|--------|--------------|--------------|--------------------|
+| Lindell22 (Schnorr) | 3 | O(n²) | Hash-based commitments | Yes |
+| DKLs23 (ECDSA) | 7-9 | O(n²) | Zero-knowledge proofs | Yes |
+| Boldyreva02 (BLS) | 1 | O(n) | Pairing verification | Yes |
+
+### Security Considerations
+
+<Warning>
+**Important Security Notes:**
+
+1. **Not Fully Side-Channel Resistant** - Higher-level protocols are built on side-channel resistant primitives (BoringSSL, fiat-cryptography), but the protocols themselves are not hardened against all side-channel attacks.
+
+2. **Random Oracle Model** - Lindell22 uses hash-based commitments, relying on the random oracle model for security.
+
+3. **Threshold vs Total** - Always maintain `threshold ≤ total` and ensure at least `threshold` honest parties.
+
+4. **Session Isolation** - Use unique session contexts for each signing operation to prevent replay attacks.
+</Warning>
+
+## Advanced Topics
+
+### Different Quorum Combinations
+
+You can sign with any subset of `threshold` or more parties:
+
+```go
+// Sign with minimum threshold (3 parties)
+quorum1 := hashset.NewComparable[sharing.ID]()
+for _, id := range []sharing.ID{1, 2, 3} {
+    quorum1.Add(id)
+}
+
+// Sign with more than threshold (4 parties)
+quorum2 := hashset.NewComparable[sharing.ID]()
+for _, id := range []sharing.ID{1, 3, 4, 5} {
+    quorum2.Add(id)
+}
+
+// Both produce valid signatures for the same public key!
+```
+
+### Concurrent Signing Sessions
+
+Multiple messages can be signed concurrently with different quorums:
+
+```go
+var wg sync.WaitGroup
+
+for i := range 5 {
+    wg.Add(1)
+    go func(msgIdx int) {
+        defer wg.Done()
+        
+        // Each goroutine creates its own cosigners with fresh contexts
+        // and signs independently
+        message := []byte(fmt.Sprintf("Message %d", msgIdx))
+        signature := signMessage(message, shards, quorum)
+        
+        // Verify
+        verifier.Verify(signature, publicKey, message)
+    }(i)
+}
+
+wg.Wait()
+```
+
+<Note>
+Each signing session requires fresh randomness and separate session contexts. Never reuse nonces or contexts across different messages.
+</Note>
+
+## Testing
+
+The repository includes comprehensive test utilities:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/network/testutils"
+
+// Create in-memory network coordinator
+coordinator := testutils.NewMockCoordinator()
+
+// Create deliveries for each party
+deliveries := make([]network.Delivery, total)
+for i := range total {
+    deliveries[i] = coordinator.AddParty(sharing.ID(i+1))
+}
+
+// Run protocol with simulated network
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Networking" icon="network-wired" href="/guides/networking">
+    Learn about network coordination and message routing
+  </Card>
+  <Card title="Custom Protocols" icon="code" href="/guides/custom-protocols">
+    Build custom MPC protocols using the library primitives
+  </Card>
+  <Card title="Security Best Practices" icon="shield" href="/guides/security-best-practices">
+    Essential security guidelines for production use
+  </Card>
+  <Card title="API Reference" icon="book" href="/api/mpc/threshold-schnorr">
+    Explore the complete API documentation
+  </Card>
+</CardGroup>

@@ -1,0 +1,398 @@
+---
+title: 'Number Theory'
+description: 'Modular arithmetic, Chinese Remainder Theorem, and primality testing'
+---
+
+## Overview
+
+The `nt` (number theory) package provides foundational primitives for modular arithmetic, Chinese Remainder Theorem (CRT), prime number operations, and other number-theoretic computations used in cryptography.
+
+## Modular Arithmetic
+
+The `modular` subpackage provides efficient modular arithmetic operations.
+
+### Arithmetic Interface
+
+```go pkg/base/nt/modular/modular.go
+type Arithmetic interface {
+    // Modulus returns the modulus used in the modular arithmetic
+    Modulus() *numct.Modulus
+    
+    // MultiplicativeOrder returns the multiplicative order of the modulus
+    MultiplicativeOrder() algebra.Cardinal
+    
+    // ModMul computes out = (a * b) mod m
+    ModMul(out, a, b *numct.Nat)
+    
+    // ModDiv computes out = (a / b) mod m
+    ModDiv(out, a, b *numct.Nat) ct.Bool
+    
+    // ModExp computes out = (base ^ exp) mod m
+    ModExp(out, base, exp *numct.Nat)
+    
+    // ModExpI computes out = (base ^ exp) mod m, where exp is a signed integer
+    ModExpI(out, base *numct.Nat, exp *numct.Int)
+    
+    // MultiBaseExp computes out[i] = (bases[i] ^ exp) mod m for all i
+    MultiBaseExp(out []*numct.Nat, bases []*numct.Nat, exp *numct.Nat)
+    
+    // ModInv computes out = (a^{-1}) mod m
+    ModInv(out, a *numct.Nat) ct.Bool
+}
+```
+
+<ParamField path="out" type="*numct.Nat">
+  Output parameter (modified in-place for efficiency)
+</ParamField>
+
+<ParamField path="a, b" type="*numct.Nat">
+  Input operands
+</ParamField>
+
+<ResponseField name="ct.Bool" type="constant-time boolean">
+  Success indicator (1 for success, 0 for failure) - constant time to prevent timing attacks
+</ResponseField>
+
+### Usage Example
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/base/nt/modular"
+
+func modularArithmeticExample() {
+    // Create modulus (example: 17)
+    p := new(numct.Nat).SetUint64(17)
+    modulus, _ := numct.NewModulus(p)
+    
+    // Values to compute with
+    a := new(numct.Nat).SetUint64(10)
+    b := new(numct.Nat).SetUint64(8)
+    result := new(numct.Nat)
+    
+    // Modular multiplication: (10 * 8) mod 17 = 80 mod 17 = 12
+    modulus.ModMul(result, a, b)
+    
+    // Modular exponentiation: 10^3 mod 17 = 1000 mod 17 = 15
+    exp := new(numct.Nat).SetUint64(3)
+    modulus.ModExp(result, a, exp)
+    
+    // Modular inverse: 10^(-1) mod 17 = 12 (since 10*12 = 120 = 7*17 + 1)
+    inverse := new(numct.Nat)
+    ok := modulus.ModInv(inverse, a)
+    if ok == ct.True {
+        // inverse is valid
+    }
+}
+```
+
+## Chinese Remainder Theorem
+
+The `crt` subpackage implements efficient CRT operations for reconstructing values from residues.
+
+### Basic CRT
+
+```go pkg/base/nt/crt/crt.go
+// One-shot CRT recombination
+func Recombine(mp, mq, p, q *numct.Nat) (result *numct.Nat, ok ct.Bool)
+
+// Precompute CRT parameters for reuse
+func Precompute(p, q *numct.Nat) (params *Params, ok ct.Bool)
+```
+
+<ParamField path="mp" type="*numct.Nat">
+  Value modulo p (m mod p)
+</ParamField>
+
+<ParamField path="mq" type="*numct.Nat">
+  Value modulo q (m mod q)
+</ParamField>
+
+<ParamField path="p, q" type="*numct.Nat">
+  Coprime moduli
+</ParamField>
+
+<ResponseField name="result" type="*numct.Nat">
+  The reconstructed value m where m ≡ mp (mod p) and m ≡ mq (mod q)
+</ResponseField>
+
+### CRT Parameters
+
+```go pkg/base/nt/crt/crt.go
+type Params struct {
+    P    *numct.Modulus  // First modulus
+    QNat *numct.Nat     // Second modulus
+    QInv *numct.Nat     // Precomputed q^(-1) mod p
+    Cap  int            // Capacity for intermediate results
+}
+
+// Recombine reconstructs m (mod p*q) from residues (mp, mq)
+func (prm *Params) Recombine(mp, mq *numct.Nat) *numct.Nat
+```
+
+The recombination formula is:
+```
+m = mq + q * ((mp - mq) * qInv mod p)
+```
+
+### Extended CRT Parameters
+
+```go pkg/base/nt/crt/crt.go
+type ParamsExtended struct {
+    Params
+    PNat *numct.Nat     // First modulus as Nat
+    Q    *numct.Modulus // Second modulus
+    M    *numct.Modulus // Product modulus (p*q)
+}
+
+// Create extended parameters
+func PrecomputePairExtended(p, q *numct.Nat) (params *ParamsExtended, ok ct.Bool)
+
+// Modulus returns the product modulus N = p * q
+func (prmx *ParamsExtended) Modulus() *numct.Modulus
+
+// Decompose splits m into (m mod p, m mod q)
+func (prmx *ParamsExtended) Decompose(m *numct.Modulus) (mp, mq *numct.Nat)
+```
+
+### CRT Usage Example
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/base/nt/crt"
+
+func crtExample() {
+    // Two coprime moduli
+    p := new(numct.Nat).SetUint64(17)
+    q := new(numct.Nat).SetUint64(19)
+    
+    // Original value m = 100
+    m := new(numct.Nat).SetUint64(100)
+    
+    // Compute residues
+    pModulus, _ := numct.NewModulus(p)
+    qModulus, _ := numct.NewModulus(q)
+    
+    mp := new(numct.Nat)
+    mq := new(numct.Nat)
+    pModulus.Mod(mp, m)  // mp = 100 mod 17 = 15
+    qModulus.Mod(mq, m)  // mq = 100 mod 19 = 5
+    
+    // Precompute CRT parameters
+    params, ok := crt.Precompute(p, q)
+    if ok == ct.False {
+        // p and q are not coprime
+        return
+    }
+    
+    // Recombine residues to recover original value
+    reconstructed := params.Recombine(mp, mq)
+    // reconstructed = 100 (mod 17*19 = 323)
+    
+    // For extended operations
+    paramsExt, _ := crt.PrecomputePairExtended(p, q)
+    
+    // Decompose a value
+    value, _ := numct.NewModulus(new(numct.Nat).SetUint64(200))
+    mp2, mq2 := paramsExt.Decompose(value)
+    
+    // Recombine
+    reconstructed2 := paramsExt.Recombine(mp2, mq2)
+}
+```
+
+### Parallel Decomposition
+
+```go pkg/base/nt/crt/crt.go
+// DecomposeParallel computes residues in parallel (faster for large moduli)
+func (prmx *ParamsExtended) DecomposeParallel(m *numct.Modulus) (mp, mq *numct.Nat)
+
+// DecomposeSerial computes residues serially (faster for small moduli)
+func (prmx *ParamsExtended) DecomposeSerial(m *numct.Modulus) (mp, mq *numct.Nat)
+```
+
+The implementation automatically chooses between parallel and serial based on modulus size (threshold: 4096 bits).
+
+## Cardinals
+
+The `cardinal` subpackage represents group/field orders.
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/base/nt/cardinal"
+
+// Create cardinal from value
+cardinal.New(value)
+
+// Special cardinals
+cardinal.Infinite()  // For infinite structures
+cardinal.Unknown()   // When order is not known
+```
+
+## Prime Number Operations
+
+The `modular` package includes prime-specific operations:
+
+```go
+// Check if modulus is prime
+func IsPrime(n *numct.Nat) bool
+
+// Generate random prime
+func RandomPrime(bits int, prng io.Reader) (*numct.Nat, error)
+
+// Check primality with Miller-Rabin
+func MillerRabin(n *numct.Nat, iterations int) bool
+```
+
+## Multi-Modulus CRT
+
+For more than two moduli:
+
+```go
+// Recombine residues for multiple moduli
+func RecombineMulti(residues []*numct.Nat, moduli []*numct.Nat) (*numct.Nat, error)
+```
+
+This generalizes CRT to n coprime moduli:
+```
+m ≡ r₀ (mod m₀)
+m ≡ r₁ (mod m₁)
+...
+m ≡ rₙ₋₁ (mod mₙ₋₁)
+```
+
+## Complete Example: RSA Key Generation
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/base/nt/crt"
+    "github.com/bronlabs/bron-crypto/pkg/base/nt/modular"
+    "github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+)
+
+func rsaKeyGenExample() error {
+    prng := pcg.NewRandomised()
+    
+    // Generate two large primes
+    p := generateLargePrime(1024, prng)
+    q := generateLargePrime(1024, prng)
+    
+    // Compute N = p * q
+    N := new(numct.Nat)
+    N.Mul(p, q)
+    
+    // Compute φ(N) = (p-1)(q-1)
+    pMinus1 := new(numct.Nat).Sub(p, numct.One)
+    qMinus1 := new(numct.Nat).Sub(q, numct.One)
+    phi := new(numct.Nat)
+    phi.Mul(pMinus1, qMinus1)
+    
+    // Choose public exponent e = 65537
+    e := new(numct.Nat).SetUint64(65537)
+    
+    // Compute private exponent d = e^(-1) mod φ(N)
+    phiModulus, _ := numct.NewModulus(phi)
+    d := new(numct.Nat)
+    ok := phiModulus.ModInv(d, e)
+    if ok == ct.False {
+        return errors.New("failed to compute inverse")
+    }
+    
+    // Precompute CRT parameters for faster decryption
+    crtParams, ok := crt.PrecomputePairExtended(p, q)
+    if ok == ct.False {
+        return errors.New("failed to precompute CRT params")
+    }
+    
+    // RSA encryption: c = m^e mod N
+    message := new(numct.Nat).SetUint64(42)
+    NModulus, _ := numct.NewModulus(N)
+    ciphertext := new(numct.Nat)
+    NModulus.ModExp(ciphertext, message, e)
+    
+    // RSA decryption using CRT for efficiency:
+    // Instead of computing m = c^d mod N directly,
+    // compute:
+    //   mp = c^d mod p
+    //   mq = c^d mod q
+    //   m = CRT(mp, mq)
+    
+    pModulus, _ := numct.NewModulus(p)
+    qModulus, _ := numct.NewModulus(q)
+    
+    cp := new(numct.Nat)
+    cq := new(numct.Nat)
+    pModulus.Mod(cp, ciphertext)
+    qModulus.Mod(cq, ciphertext)
+    
+    dp := new(numct.Nat)
+    dq := new(numct.Nat)
+    pModulus.Mod(dp, d)  // dp = d mod (p-1)
+    qModulus.Mod(dq, d)  // dq = d mod (q-1)
+    
+    mp := new(numct.Nat)
+    mq := new(numct.Nat)
+    pModulus.ModExp(mp, cp, dp)
+    qModulus.ModExp(mq, cq, dq)
+    
+    // Recombine using CRT
+    decrypted := crtParams.Recombine(mp, mq)
+    
+    // Verify decryption
+    if decrypted.Equal(message) {
+        // Success!
+    }
+    
+    return nil
+}
+```
+
+## Performance Considerations
+
+### CRT Speedup
+
+Using CRT for modular exponentiation provides approximately 4x speedup:
+
+- **Direct**: One exponentiation mod N (2048 bits)
+- **CRT**: Two exponentiations mod p and mod q (1024 bits each) + recombination
+
+Since 1024-bit exponentiation is ~4x faster than 2048-bit, and we do two of them, the overhead is minimal.
+
+### Constant-Time Operations
+
+All modular arithmetic operations are constant-time to prevent timing attacks:
+
+- Comparisons return `ct.Bool` (not regular `bool`)
+- Conditional operations use constant-time select
+- No branching on secret data
+
+### Memory Management
+
+For efficiency, most operations use in-place modification:
+
+```go
+// Allocate output buffer once
+result := new(numct.Nat)
+
+// Reuse buffer for multiple operations
+modulus.ModMul(result, a, b)
+modulus.ModExp(result, result, exp)
+```
+
+## Error Handling
+
+Operations return `ct.Bool` to indicate success/failure in constant time:
+
+```go
+ok := modulus.ModInv(inverse, a)
+if ok == ct.True {
+    // inverse is valid
+} else {
+    // a is not invertible modulo m
+}
+```
+
+For CRT operations:
+- Returns `ct.False` if moduli are not coprime
+- Returns `ct.False` if modulus construction fails
+
+## Related Documentation
+
+- [Algebra](/api/base/algebra) - Algebraic structures for quotient rings and fields
+- [Curves](/api/base/curves) - Elliptic curves using modular arithmetic

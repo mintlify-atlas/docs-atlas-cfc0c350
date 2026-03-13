@@ -1,0 +1,232 @@
+---
+title: 'Non-Interactive Compilers'
+description: 'Transform interactive Sigma protocols into non-interactive zero-knowledge proofs'
+---
+
+## Overview
+
+The compiler package provides three methods to transform interactive Sigma protocols into non-interactive zero-knowledge proofs (NIZKs). Each compiler offers different security guarantees and efficiency trade-offs.
+
+## Fiat-Shamir Compiler
+
+The Fiat-Shamir transform replaces the verifier's random challenge with a hash of the transcript. This is the most efficient compiler but requires the random oracle model.
+
+### Creating a Compiler
+
+```go pkg/proofs/sigma/compiler/fiatshamir/fiat_shamir.go
+func NewCompiler[
+    X sigma.Statement,
+    W sigma.Witness,
+    A sigma.Statement,
+    S sigma.State,
+    Z sigma.Response,
+](sigmaProtocol sigma.Protocol[X, W, A, S, Z]) (compiler.NonInteractiveProtocol[X, W], error)
+```
+
+<ParamField path="sigmaProtocol" type="Protocol[X, W, A, S, Z]">
+  The underlying Sigma protocol to compile. Must have soundness error ≥ 128 bits for computational security.
+</ParamField>
+
+### Proof Structure
+
+```go pkg/proofs/sigma/compiler/fiatshamir/fiat_shamir.go
+type Proof[A sigma.Commitment, Z sigma.Response] struct {
+    a A  // Prover's commitment
+    z Z  // Prover's response
+}
+```
+
+The challenge is computed as `e = H(statement || commitment)` where H is a cryptographic hash function.
+
+### Usage Example
+
+```go
+import (
+    "io"
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+    "github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+    "github.com/bronlabs/bron-crypto/pkg/network"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/dlog/schnorr"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compiler/fiatshamir"
+    "github.com/bronlabs/bron-crypto/pkg/transcripts/hagrid"
+)
+
+func fiatShamirExample() error {
+    prng := pcg.NewRandomised()
+    curve := k256.NewCurve()
+    
+    var sessionID network.SID
+    io.ReadFull(prng, sessionID[:])
+    
+    // Create Schnorr protocol
+    schnorrProtocol, _ := schnorr.NewProtocol(curve.Generator(), prng)
+    
+    // Create Fiat-Shamir compiler
+    niScheme, _ := fiatshamir.NewCompiler(schnorrProtocol)
+    
+    // Generate witness and statement
+    witnessValue, _ := curve.ScalarField().Random(prng)
+    witness := schnorr.NewWitness(witnessValue)
+    statementValue := curve.ScalarBaseMul(witnessValue)
+    statement := schnorr.NewStatement(statementValue)
+    
+    // Prover creates non-interactive proof
+    proverTranscript := hagrid.NewTranscript("test")
+    prover, _ := niScheme.NewProver(sessionID, proverTranscript)
+    proof, _ := prover.Prove(statement, witness)
+    
+    // Verifier checks proof
+    verifierTranscript := hagrid.NewTranscript("test")
+    verifier, _ := niScheme.NewVerifier(sessionID, verifierTranscript)
+    return verifier.Verify(statement, proof)
+}
+```
+
+## Fischlin Compiler
+
+The Fischlin transform provides non-interactive proofs without random oracles, offering stronger security guarantees at the cost of larger proof sizes.
+
+### Creating a Compiler
+
+```go pkg/proofs/sigma/compiler/fischlin/fischlin.go
+func NewCompiler[
+    X sigma.Statement,
+    W sigma.Witness,
+    A sigma.Statement,
+    S sigma.State,
+    Z sigma.Response,
+](sigmaProtocol sigma.Protocol[X, W, A, S, Z], prng io.Reader) (compiler.NonInteractiveProtocol[X, W], error)
+```
+
+<ParamField path="sigmaProtocol" type="Protocol[X, W, A, S, Z]">
+  The underlying Sigma protocol to compile
+</ParamField>
+
+<ParamField path="prng" type="io.Reader">
+  Cryptographically secure random number generator for proof generation
+</ParamField>
+
+### Proof Structure
+
+```go pkg/proofs/sigma/compiler/fischlin/fischlin.go
+type Proof[A sigma.Commitment, Z sigma.Response] struct {
+    Rho uint64      // Number of parallel repetitions
+    B   uint64      // Security parameter
+    A   []A         // Commitments for each repetition
+    E   [][]byte    // Challenges for each repetition
+    Z   []Z         // Responses for each repetition
+}
+```
+
+Fischlin proofs contain multiple parallel executions to achieve security without the random oracle model.
+
+### Security Parameters
+
+The Fischlin compiler automatically computes optimal parameters:
+
+- **ρ (rho)**: Number of parallel repetitions
+- **b**: Challenge length parameter satisfying `ρ * b ≥ 128`
+- **t**: Sampling bound for finding valid challenges
+
+## Randomised Fischlin Compiler
+
+A variant of Fischlin with randomization for improved efficiency while maintaining security without random oracles.
+
+### Creating a Compiler
+
+```go pkg/proofs/sigma/compiler/randfischlin/fischlin.go
+func NewCompiler[
+    X sigma.Statement,
+    W sigma.Witness,
+    A sigma.Statement,
+    S sigma.State,
+    Z sigma.Response,
+](sigmaProtocol sigma.Protocol[X, W, A, S, Z], prng io.Reader) (compiler.NonInteractiveProtocol[X, W], error)
+```
+
+### Proof Structure
+
+```go pkg/proofs/sigma/compiler/randfischlin/fischlin.go
+type Proof[A sigma.Commitment, Z sigma.Response] struct {
+    A []A         // Commitments for R parallel repetitions
+    E [][]byte    // Challenges for each repetition
+    Z []Z         // Responses for each repetition
+}
+```
+
+### Security Parameters
+
+The randomised Fischlin compiler uses fixed parameters:
+
+```go pkg/proofs/sigma/compiler/randfischlin/fischlin.go
+const (
+    Lambda = 128  // Computational security parameter in bits
+    L = 8         // Hash output length parameter
+    R = 16        // Number of parallel repetitions (Lambda / L)
+    T = 40        // Challenge sampling bound in bits
+)
+```
+
+## Compiler Interface
+
+All compilers implement a common interface:
+
+```go
+type NonInteractiveProtocol[X sigma.Statement, W sigma.Witness] interface {
+    Name() Name
+    SigmaProtocolName() sigma.Name
+    NewProver(sessionID network.SID, transcript transcripts.Transcript) (NIProver[X, W], error)
+    NewVerifier(sessionID network.SID, transcript transcripts.Transcript) (NIVerifier[X], error)
+}
+
+type NIProver[X sigma.Statement, W sigma.Witness] interface {
+    Prove(statement X, witness W) ([]byte, error)
+}
+
+type NIVerifier[X sigma.Statement] interface {
+    Verify(statement X, proof []byte) error
+}
+```
+
+## Compiler Comparison
+
+| Compiler | Proof Size | Security Model | Efficiency |
+|----------|------------|----------------|------------|
+| **Fiat-Shamir** | Smallest (1 execution) | Random Oracle Model | Fastest |
+| **Fischlin** | Large (ρ executions) | Standard Model | Slower |
+| **Randomised Fischlin** | Medium (R=16 executions) | Standard Model | Moderate |
+
+### When to Use Each Compiler
+
+**Fiat-Shamir**: Use when you need maximum efficiency and can accept the random oracle assumption. Best for most practical applications.
+
+**Fischlin**: Use when you need security without random oracles and can tolerate larger proofs. Best for high-security scenarios.
+
+**Randomised Fischlin**: Use as a middle ground between Fiat-Shamir and Fischlin. Offers standard model security with better efficiency than standard Fischlin.
+
+## Soundness Requirements
+
+All compilers require the underlying Sigma protocol to have sufficient soundness:
+
+- **Interactive proofs**: ≥ 40 bits (statistical security)
+- **Non-interactive proofs**: ≥ 128 bits (computational security)
+
+The compiler constructors will return an error if the soundness is insufficient.
+
+## Serialization
+
+All proof types support CBOR serialization:
+
+```go
+// Serialize proof
+proofBytes, err := proof.MarshalCBOR()
+
+// Deserialize proof
+var proof fiatshamir.Proof[A, Z]
+err = proof.UnmarshalCBOR(proofBytes)
+```
+
+## Related Documentation
+
+- [Sigma Protocols](/api/proofs/sigma-protocols) - The underlying interactive protocols
+- [Composition](/api/proofs/composition) - Compose protocols before compiling

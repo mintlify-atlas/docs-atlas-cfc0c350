@@ -1,0 +1,393 @@
+---
+title: 'Threshold BLS Signatures'
+description: 'Boldyreva02 threshold BLS signature scheme implementation'
+---
+
+## Overview
+
+The `boldyreva02` package implements the Boldyreva threshold BLS (Boneh-Lynn-Shacham) signature scheme. This protocol enables non-interactive threshold signatures on pairing-friendly curves, where each party can independently produce a partial signature that can be aggregated without further interaction.
+
+**Location**: `pkg/mpc/tsig/tbls/boldyreva02/`
+
+## Key Features
+
+- Non-interactive signing (one round only)
+- Support for both short key and long key variants
+- Multiple rogue key prevention algorithms (Basic, MessageAugmentation, POP)
+- Aggregatable signatures
+- Pairing-based verification
+- Compatible with Gennaro DKG for key generation
+
+## Core Types
+
+### Shard
+
+```go
+type Shard[
+    PK curves.PairingFriendlyPoint[PK, PKFE, SG, SGFE, E, S],
+    PKFE algebra.FieldElement[PKFE],
+    SG curves.PairingFriendlyPoint[SG, SGFE, PK, PKFE, E, S],
+    SGFE algebra.FieldElement[SGFE],
+    E algebra.MultiplicativeGroupElement[E],
+    S algebra.PrimeFieldElement[S],
+] = tbls.Shard[PK, PKFE, SG, SGFE, E, S]
+```
+
+Represents a party's secret share in the Boldyreva threshold BLS signature scheme.
+
+### PublicMaterial
+
+```go
+type PublicMaterial[
+    PK curves.PairingFriendlyPoint[PK, PKFE, SG, SGFE, E, S],
+    PKFE algebra.FieldElement[PKFE],
+    SG curves.PairingFriendlyPoint[SG, SGFE, PK, PKFE, E, S],
+    SGFE algebra.FieldElement[SGFE],
+    E algebra.MultiplicativeGroupElement[E],
+    S algebra.PrimeFieldElement[S],
+] = tbls.PublicMaterial[PK, PKFE, SG, SGFE, E, S]
+```
+
+Contains the public cryptographic material for the Boldyreva threshold BLS scheme, including the joint public key and verification information.
+
+### PartialSignature
+
+```go
+type PartialSignature[
+    Sig curves.PairingFriendlyPoint[Sig, SigFE, PK, PKFE, E, S],
+    SigFE algebra.FieldElement[SigFE],
+    PK curves.PairingFriendlyPoint[PK, PKFE, Sig, SigFE, E, S],
+    PKFE algebra.FieldElement[PKFE],
+    E algebra.MultiplicativeGroupElement[E],
+    S algebra.PrimeFieldElement[S],
+] struct {
+    SigmaI    *bls.Signature[Sig, SigFE, PK, PKFE, E, S]
+    SigmaPopI *bls.Signature[Sig, SigFE, PK, PKFE, E, S]
+}
+```
+
+Represents a partial BLS signature produced by a single party.
+
+<ParamField path="SigmaI" type="*bls.Signature" required>
+  The partial signature on the message
+</ParamField>
+
+<ParamField path="SigmaPopI" type="*bls.Signature">
+  The proof-of-possession signature (present only when using POP algorithm)
+</ParamField>
+
+**Methods**:
+- `Equal(other *PartialSignature) bool`: Compares two partial signatures
+- `Bytes() []byte`: Returns the byte representation
+
+## Key Generation
+
+### NewShortKeyShard
+
+```go
+func NewShortKeyShard[
+    PK curves.PairingFriendlyPoint[PK, PKFE, SG, SGFE, E, S],
+    PKFE algebra.FieldElement[PKFE],
+    SG curves.PairingFriendlyPoint[SG, SGFE, PK, PKFE, E, S],
+    SGFE algebra.FieldElement[SGFE],
+    E algebra.MultiplicativeGroupElement[E],
+    S algebra.PrimeFieldElement[S],
+](
+    output *gennaro.DKGOutput[PK, S],
+) (*tbls.Shard[PK, PKFE, SG, SGFE, E, S], error)
+```
+
+Creates a threshold BLS shard for the short key variant from DKG output.
+
+**Short Key Variant**: Public keys are in G1 (smaller), signatures are in G2 (larger).
+
+<ParamField path="output" type="*gennaro.DKGOutput[PK, S]" required>
+  The output from a Gennaro distributed key generation protocol
+</ParamField>
+
+<ResponseField name="*tbls.Shard">
+  The created threshold BLS shard containing the party's secret share
+</ResponseField>
+
+<ResponseField name="error">
+  Returns error if DKG output is invalid or shard creation fails
+</ResponseField>
+
+### NewLongKeyShard
+
+```go
+func NewLongKeyShard[
+    PK curves.PairingFriendlyPoint[PK, PKFE, SG, SGFE, E, S],
+    PKFE algebra.FieldElement[PKFE],
+    SG curves.PairingFriendlyPoint[SG, SGFE, PK, PKFE, E, S],
+    SGFE algebra.FieldElement[SGFE],
+    E algebra.MultiplicativeGroupElement[E],
+    S algebra.PrimeFieldElement[S],
+](
+    output *gennaro.DKGOutput[PK, S],
+) (*tbls.Shard[PK, PKFE, SG, SGFE, E, S], error)
+```
+
+Creates a threshold BLS shard for the long key variant from DKG output.
+
+**Long Key Variant**: Public keys are in G2 (larger), signatures are in G1 (smaller).
+
+<ParamField path="output" type="*gennaro.DKGOutput[PK, S]" required>
+  The output from a Gennaro distributed key generation protocol
+</ParamField>
+
+## Signing Protocol
+
+### Cosigner
+
+```go
+type Cosigner[
+    PK curves.PairingFriendlyPoint[PK, PKFE, SG, SGFE, E, S],
+    PKFE algebra.FieldElement[PKFE],
+    SG curves.PairingFriendlyPoint[SG, SGFE, PK, PKFE, E, S],
+    SGFE algebra.FieldElement[SGFE],
+    E algebra.MultiplicativeGroupElement[E],
+    S algebra.PrimeFieldElement[S],
+] struct
+```
+
+A participant in the Boldyreva threshold BLS signing protocol.
+
+#### NewCosigner
+
+```go
+func NewCosigner[PK, PKFE, SG, SGFE, E, S](
+    shard *boldyreva02.Shard[PK, PKFE, SG, SGFE, E, S],
+    scheme *bls.Scheme[PK, PKFE, SG, SGFE, E, S],
+) (*Cosigner[PK, PKFE, SG, SGFE, E, S], error)
+```
+
+Creates a new cosigner for threshold BLS signing.
+
+<ParamField path="shard" type="*boldyreva02.Shard" required>
+  The party's secret key share
+</ParamField>
+
+<ParamField path="scheme" type="*bls.Scheme" required>
+  The BLS signature scheme with chosen rogue key prevention algorithm
+</ParamField>
+
+#### ProducePartialSignature
+
+```go
+func (c *Cosigner[PK, PKFE, SG, SGFE, E, S]) ProducePartialSignature(
+    message []byte,
+) (*PartialSignature[SG, SGFE, PK, PKFE, E, S], error)
+```
+
+Produces a partial BLS signature on the given message. This is non-interactive and requires no coordination with other parties.
+
+<ParamField path="message" type="[]byte" required>
+  The message to sign
+</ParamField>
+
+<ResponseField name="*PartialSignature">
+  The partial signature including POP if required by the scheme
+</ResponseField>
+
+## Signature Aggregation
+
+### Aggregator
+
+```go
+type Aggregator[
+    PK curves.PairingFriendlyPoint[PK, PKFE, SG, SGFE, E, S],
+    PKFE algebra.FieldElement[PKFE],
+    SG curves.PairingFriendlyPoint[SG, SGFE, PK, PKFE, E, S],
+    SGFE algebra.FieldElement[SGFE],
+    E algebra.MultiplicativeGroupElement[E],
+    S algebra.PrimeFieldElement[S],
+] struct
+```
+
+Collects and combines partial BLS signatures from multiple cosigners into a single threshold signature.
+
+#### NewShortKeyAggregator
+
+```go
+func NewShortKeyAggregator[
+    P1 curves.PairingFriendlyPoint[P1, FE1, P2, FE2, E, S],
+    FE1 algebra.FieldElement[FE1],
+    P2 curves.PairingFriendlyPoint[P2, FE2, P1, FE1, E, S],
+    FE2 algebra.FieldElement[FE2],
+    E algebra.MultiplicativeGroupElement[E],
+    S algebra.PrimeFieldElement[S],
+](
+    curveFamily curves.PairingFriendlyFamily[P1, FE1, P2, FE2, E, S],
+    publicMaterial *boldyreva02.PublicMaterial[P1, FE1, P2, FE2, E, S],
+    rogueKeyAlg bls.RogueKeyPreventionAlgorithm,
+) (*Aggregator[P1, FE1, P2, FE2, E, S], error)
+```
+
+Creates a new Aggregator for the short key variant of BLS signatures.
+
+<ParamField path="curveFamily" type="curves.PairingFriendlyFamily" required>
+  The pairing-friendly curve family to use (e.g., BLS12-381)
+</ParamField>
+
+<ParamField path="publicMaterial" type="*boldyreva02.PublicMaterial" required>
+  The public cryptographic material for the threshold scheme
+</ParamField>
+
+<ParamField path="rogueKeyAlg" type="bls.RogueKeyPreventionAlgorithm" required>
+  The rogue key prevention algorithm: Basic, MessageAugmentation, or POP
+</ParamField>
+
+#### NewLongKeyAggregator
+
+```go
+func NewLongKeyAggregator[
+    P1 curves.PairingFriendlyPoint[P1, FE1, P2, FE2, E, S],
+    FE1 algebra.FieldElement[FE1],
+    P2 curves.PairingFriendlyPoint[P2, FE2, P1, FE1, E, S],
+    FE2 algebra.FieldElement[FE2],
+    E algebra.MultiplicativeGroupElement[E],
+    S algebra.PrimeFieldElement[S],
+](
+    curveFamily curves.PairingFriendlyFamily[P1, FE1, P2, FE2, E, S],
+    publicMaterial *boldyreva02.PublicMaterial[P2, FE2, P1, FE1, E, S],
+    rogueKeyAlg bls.RogueKeyPreventionAlgorithm,
+) (*Aggregator[P2, FE2, P1, FE1, E, S], error)
+```
+
+Creates a new Aggregator for the long key variant of BLS signatures.
+
+#### Aggregate
+
+```go
+func (A *Aggregator[PK, PKFE, SG, SGFE, E, S]) Aggregate(
+    partialSigs network.RoundMessages[*boldyreva02.PartialSignature[SG, SGFE, PK, PKFE, E, S]],
+    message []byte,
+) (*bls.Signature[SG, SGFE, PK, PKFE, E, S], error)
+```
+
+Combines partial signatures from multiple cosigners into a single threshold signature. Verifies each partial signature against the corresponding partial public key before aggregation.
+
+<ParamField path="partialSigs" type="network.RoundMessages[*PartialSignature]" required>
+  The collection of partial signatures from cosigners
+</ParamField>
+
+<ParamField path="message" type="[]byte" required>
+  The original message that was signed
+</ParamField>
+
+<ResponseField name="*bls.Signature">
+  The aggregated BLS signature
+</ResponseField>
+
+<ResponseField name="error">
+  Returns error with identifiable party ID tag if verification fails
+</ResponseField>
+
+**Verification Process**:
+1. Checks quorum is authorized
+2. Verifies each partial signature individually
+3. Verifies POP signatures if using POP algorithm
+4. Aggregates verified partial signatures
+5. Returns final signature
+
+## Rogue Key Prevention Algorithms
+
+The Boldyreva02 scheme supports three rogue key prevention algorithms:
+
+### Basic
+
+```go
+bls.Basic
+```
+
+No additional protection. Requires trusted setup or known private keys.
+
+### Message Augmentation
+
+```go
+bls.MessageAugmentation
+```
+
+Augments the message with the public key: `message' = message || pk`
+
+### Proof of Possession (POP)
+
+```go
+bls.POP
+```
+
+Requires each party to prove knowledge of their private key by signing their public key. Most commonly used in practice.
+
+## Usage Example
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/pairable/bls12381"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tbls/boldyreva02"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tbls/boldyreva02/keygen"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tbls/boldyreva02/signing"
+    "github.com/bronlabs/bron-crypto/pkg/signatures/bls"
+)
+
+// 1. Create shard from DKG output
+shard, err := keygen.NewShortKeyShard(dkgOutput)
+
+// 2. Create BLS scheme with POP
+curveFamily := bls12381.NewCurveFamily()
+scheme, err := bls.NewShortKeyScheme(curveFamily, bls.POP)
+
+// 3. Create cosigner
+cosigner, err := signing.NewCosigner(shard, scheme)
+
+// 4. Produce partial signature (non-interactive)
+partialSig, err := cosigner.ProducePartialSignature(message)
+
+// 5. Create aggregator
+aggregator, err := signing.NewShortKeyAggregator(
+    curveFamily,
+    publicMaterial,
+    bls.POP,
+)
+
+// 6. Aggregate partial signatures
+signature, err := aggregator.Aggregate(partialSignatures, message)
+```
+
+## BLS Signature Variants
+
+### Short Key Variant
+
+- **Public keys**: G1 (48 bytes for BLS12-381)
+- **Signatures**: G2 (96 bytes for BLS12-381)
+- **Use case**: When public keys are transmitted frequently
+- **Example**: Proof-of-Stake validators with fixed public keys
+
+### Long Key Variant
+
+- **Public keys**: G2 (96 bytes for BLS12-381)
+- **Signatures**: G1 (48 bytes for BLS12-381)
+- **Use case**: When signatures are transmitted frequently
+- **Example**: Blockchain signatures, certificate chains
+
+## Security Considerations
+
+- **Non-interactive**: Each party can sign independently once they have the message
+- **Pairing-based**: Security relies on hardness of discrete log in pairing-friendly groups
+- **Rogue key attacks**: Must use appropriate prevention algorithm (POP recommended)
+- **Identifiable abort**: Invalid partial signatures can be traced to specific parties
+- **Deterministic**: No randomness needed during signing (optional message hashing)
+
+## Performance Characteristics
+
+- **Signing**: Very fast, single point multiplication
+- **Verification**: Requires pairing operations (slower than ECDSA)
+- **Aggregation**: Simple point addition
+- **Signature size**: Constant, independent of threshold
+- **Communication**: One round only (non-interactive)
+
+## Error Handling
+
+- **ErrInvalidArgument**: Invalid parameters provided
+- **ErrFailed**: Operation failed (e.g., signature verification)
+- Identifiable abort errors include `base.IdentifiableAbortPartyIDTag` for tracing malicious parties

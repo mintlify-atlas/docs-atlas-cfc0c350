@@ -1,0 +1,397 @@
+---
+title: 'Distributed Key Generation (DKG)'
+description: 'Gennaro distributed key generation protocol for threshold cryptography'
+---
+
+## Overview
+
+The `gennaro` package provides distributed key generation for threshold signatures following the Gennaro et al. construction. Each party acts as a dealer for a Pedersen VSS, proves well-formedness with batch Schnorr proofs, and aggregates Feldman verification vectors into the joint public key.
+
+**Location**: `pkg/mpc/dkg/gennaro/`
+
+**Reference**: Gennaro et al., "Secure Distributed Key Generation for Discrete-Log Based Cryptosystems"
+
+## Key Features
+
+- Three-round protocol for secure key generation
+- Verifiable Secret Sharing (VSS) based on Pedersen commitments
+- Batch zero-knowledge proofs for efficiency
+- Feldman verification vectors for public verifiability
+- Support for arbitrary threshold access structures
+- Identifiable abort for detecting malicious dealers
+
+## Core Types
+
+### Participant
+
+```go
+type Participant[E GroupElement[E, S], S Scalar[S]] struct
+```
+
+Orchestrates the Gennaro DKG protocol for one party. Manages all three rounds of the protocol.
+
+#### NewParticipant
+
+```go
+func NewParticipant[E GroupElement[E, S], S Scalar[S]](
+    ctx *session.Context,
+    group Group[E, S],
+    ac *threshold.Threshold,
+    niCompilerName compiler.Name,
+    prng io.Reader,
+) (*Participant[E, S], error)
+```
+
+Constructs a participant for the Gennaro DKG protocol.
+
+<ParamField path="ctx" type="*session.Context" required>
+  MPC session context with party ID and quorum information
+</ParamField>
+
+<ParamField path="group" type="Group[E, S]" required>
+  The prime-order group for cryptographic operations
+</ParamField>
+
+<ParamField path="ac" type="*threshold.Threshold" required>
+  The threshold access structure (e.g., t-of-n threshold)
+</ParamField>
+
+<ParamField path="niCompilerName" type="compiler.Name" required>
+  Non-interactive proof compiler (e.g., Fiat-Shamir)
+</ParamField>
+
+<ParamField path="prng" type="io.Reader" required>
+  Cryptographically secure random number generator
+</ParamField>
+
+**Methods**:
+- `SharingID() sharing.ID`: Returns the participant's identifier
+- `AccessStructure() *threshold.Threshold`: Returns the access structure
+
+### DKGOutput
+
+```go
+type DKGOutput[E GroupElement[E, S], S Scalar[S]] struct {
+    DKGPublicOutput[E, S]
+    share *feldman.Share[S]
+}
+```
+
+Contains both public material and the participant's private share from the DKG.
+
+#### NewDKGOutput
+
+```go
+func NewDKGOutput[E GroupElement[E, S], S Scalar[S]](
+    share *feldman.Share[S],
+    vector feldman.VerificationVector[E, S],
+    accessStructure *threshold.Threshold,
+) (*DKGOutput[E, S], error)
+```
+
+Builds an output wrapper from a verified Feldman share and verification vector.
+
+<ParamField path="share" type="*feldman.Share[S]" required>
+  The party's private Feldman share
+</ParamField>
+
+<ParamField path="vector" type="feldman.VerificationVector[E, S]" required>
+  The aggregated verification vector
+</ParamField>
+
+<ParamField path="accessStructure" type="*threshold.Threshold" required>
+  The threshold access structure
+</ParamField>
+
+**Methods**:
+- `Share() *feldman.Share[S]`: Returns the private Feldman share
+- `PublicMaterial() *DKGPublicOutput[E, S]`: Returns a copy of the public output
+
+### DKGPublicOutput
+
+```go
+type DKGPublicOutput[E GroupElement[E, S], S Scalar[S]] struct {
+    publicKeyValue         E
+    partialPublicKeyValues ds.Map[sharing.ID, E]
+    fv                     feldman.VerificationVector[E, S]
+    accessStructure        *threshold.Threshold
+}
+```
+
+Collects the public artifacts from the Gennaro DKG execution.
+
+**Methods**:
+- `PublicKeyValue() E`: Returns the joint public key value
+- `PartialPublicKeyValues() ds.Map[sharing.ID, E]`: Returns per-party public key contributions
+- `VerificationVector() feldman.VerificationVector[E, S]`: Returns the Feldman verification vector
+- `AccessStructure() *threshold.Threshold`: Returns the access structure
+
+## Protocol Execution
+
+### NewRunner
+
+```go
+func NewRunner[G algebra.PrimeGroupElement[G, S], S algebra.PrimeFieldElement[S]](
+    ctx *session.Context,
+    group algebra.PrimeGroup[G, S],
+    accessStructure *threshold.Threshold,
+    niCompilerName compiler.Name,
+    prng io.Reader,
+) (network.Runner[*DKGOutput[G, S]], error)
+```
+
+Constructs a network runner that drives the three DKG rounds automatically.
+
+<ParamField path="ctx" type="*session.Context" required>
+  MPC session context
+</ParamField>
+
+<ParamField path="group" type="algebra.PrimeGroup[G, S]" required>
+  Prime-order group for operations
+</ParamField>
+
+<ParamField path="accessStructure" type="*threshold.Threshold" required>
+  Threshold access structure
+</ParamField>
+
+<ParamField path="niCompilerName" type="compiler.Name" required>
+  Non-interactive proof compiler name
+</ParamField>
+
+<ParamField path="prng" type="io.Reader" required>
+  Random number generator
+</ParamField>
+
+<ResponseField name="network.Runner[*DKGOutput[G, S]]">
+  Runner that executes the complete 3-round DKG protocol
+</ResponseField>
+
+### Manual Round Execution
+
+For more control, you can execute rounds manually:
+
+#### Round1
+
+```go
+func (p *Participant[E, S]) Round1() (
+    *Round1Broadcast[E, S],
+    network.OutgoingUnicasts[*Round1Unicast[E, S]],
+    error,
+)
+```
+
+Executes the first round: each party acts as a Pedersen VSS dealer.
+
+**Round 1 Actions**:
+- Sample random polynomial f(x) of degree t-1
+- Create Pedersen commitments to polynomial coefficients
+- Generate shares f(i) for each participant i
+- Compute Feldman verification vector
+- Broadcast commitments and verification vector
+- Send individual shares via unicast
+
+<ResponseField name="*Round1Broadcast[E, S]">
+  Broadcast message containing Feldman verification vector and Pedersen commitments
+</ResponseField>
+
+<ResponseField name="network.OutgoingUnicasts[*Round1Unicast[E, S]]">
+  Unicast messages containing individual Pedersen shares
+</ResponseField>
+
+#### Round2
+
+```go
+func (p *Participant[E, S]) Round2(
+    r2bIn network.RoundMessages[*Round1Broadcast[E, S]],
+    r2uIn network.RoundMessages[*Round1Unicast[E, S]],
+) (*Round2Broadcast[E, S], error)
+```
+
+Executes the second round: verify received shares and commitments.
+
+**Round 2 Actions**:
+- Verify Pedersen commitments using zero-knowledge proofs
+- Verify received shares against verification vectors
+- Sum up all received shares to get final share
+- If verification fails, broadcast complaint
+- If valid, broadcast acknowledgment
+
+<ParamField path="r2bIn" type="network.RoundMessages[*Round1Broadcast[E, S]]" required>
+  Broadcast messages from round 1
+</ParamField>
+
+<ParamField path="r2uIn" type="network.RoundMessages[*Round1Unicast[E, S]]" required>
+  Unicast messages from round 1
+</ParamField>
+
+<ResponseField name="*Round2Broadcast[E, S]">
+  Broadcast message with validation result or complaints
+</ResponseField>
+
+#### Round3
+
+```go
+func (p *Participant[E, S]) Round3(
+    r3bIn network.RoundMessages[*Round2Broadcast[E, S]],
+) (*DKGOutput[E, S], error)
+```
+
+Executes the third round: finalize the DKG output.
+
+**Round 3 Actions**:
+- Process round 2 broadcasts and resolve any complaints
+- Aggregate Feldman verification vectors from all parties
+- Compute joint public key from aggregated vector
+- Finalize share and verification material
+- Return DKG output
+
+<ParamField path="r3bIn" type="network.RoundMessages[*Round2Broadcast[E, S]]" required>
+  Broadcast messages from round 2
+</ParamField>
+
+<ResponseField name="*DKGOutput[E, S]">
+  The complete DKG output with private share and public material
+</ResponseField>
+
+## Usage Example
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/mpc/dkg/gennaro"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/sharing/accessstructures/threshold"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compiler/fiatshamir"
+)
+
+// 1. Create threshold access structure
+threshold := uint(3)
+total := uint(5)
+shareholders := sharing.NewOrdinalShareholderSet(total)
+accessStructure, err := threshold.NewThresholdAccessStructure(threshold, shareholders)
+
+// 2. Create runner for automated execution
+runner, err := gennaro.NewRunner(
+    ctx,
+    group,
+    accessStructure,
+    fiatshamir.Name,
+    prng,
+)
+
+// 3. Execute DKG
+dkgOutput, err := runner.Run(router)
+
+// 4. Use DKG output
+publicKey := dkgOutput.PublicKeyValue()
+privateShare := dkgOutput.Share()
+verificationVector := dkgOutput.VerificationVector()
+```
+
+### Manual Round Execution Example
+
+```go
+// Create participant
+participant, err := gennaro.NewParticipant(
+    ctx,
+    group,
+    accessStructure,
+    fiatshamir.Name,
+    prng,
+)
+
+// Round 1
+r1Broadcast, r1Unicasts, err := participant.Round1()
+// Exchange messages via network...
+
+// Round 2
+r2Broadcast, err := participant.Round2(r2BroadcastIn, r2UnicastIn)
+// Exchange messages...
+
+// Round 3
+dkgOutput, err := participant.Round3(r3BroadcastIn)
+```
+
+## Protocol Details
+
+### Pedersen VSS
+
+The protocol uses Pedersen Verifiable Secret Sharing (VSS):
+
+- **Commitment**: Each coefficient a_k is committed as C_k = g^a_k · h^r_k
+- **Share**: Each party i receives share s_i = f(i) + r(i) mod q
+- **Verification**: Shares can be verified against commitments
+
+### Feldman Verification
+
+The public verification uses Feldman VSS:
+
+- **Verification Vector**: V = [g^a_0, g^a_1, ..., g^a_{t-1}]
+- **Public Key**: PK = V[0] = g^a_0 (aggregated across all dealers)
+- **Share Verification**: Check if g^s_i = ∏ V[k]^{i^k}
+
+### Zero-Knowledge Proofs
+
+- **Round 1**: Batch Schnorr proofs of knowledge of polynomial coefficients
+- **Compiler**: Uses Fiat-Shamir transform for non-interactive proofs
+- **Soundness**: Proves dealer knows coefficients without revealing them
+
+## Security Properties
+
+- **Secure against t-1 malicious parties**: Can tolerate up to threshold-1 corrupt participants
+- **Identifiable abort**: Can detect which party is malicious if protocol aborts
+- **No trusted dealer**: Joint key generation without trusted third party
+- **Verifiable shares**: Each party can verify their share independently
+- **Unlinkable**: Shares reveal no information about the final key to individual parties
+
+## Message Types
+
+### Round1Broadcast
+
+```go
+type Round1Broadcast[E GroupElement[E, S], S Scalar[S]] struct
+```
+
+Contains Feldman verification vector and commitment proofs.
+
+### Round1Unicast
+
+```go
+type Round1Unicast[E GroupElement[E, S], S Scalar[S]] struct
+```
+
+Contains the Pedersen share for a specific recipient.
+
+### Round2Broadcast
+
+```go
+type Round2Broadcast[E GroupElement[E, S], S Scalar[S]] struct
+```
+
+Contains validation results or complaints about received shares.
+
+## Error Handling
+
+- **ErrInvalidArgument**: Invalid parameters provided
+- **ErrFailed**: Protocol execution failed
+- **Identifiable Abort**: Includes party ID tag when specific party is malicious
+- **Verification Failures**: Detected in Round 2, result in complaints
+
+## Performance Considerations
+
+- **Communication**: O(n²) messages for n parties (broadcast + unicast)
+- **Computation**: O(nt) exponentiations for threshold t
+- **Round Complexity**: 3 rounds
+- **Message Size**: Linear in threshold t
+
+## Integration with Threshold Signatures
+
+The DKG output can be used to create shards for various threshold signature schemes:
+
+```go
+// For Threshold Schnorr
+import "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22/keygen"
+schnorrShard, err := keygen.NewShard(dkgOutput)
+
+// For Threshold BLS
+import "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tbls/boldyreva02/keygen"
+blsShard, err := keygen.NewShortKeyShard(dkgOutput)
+```

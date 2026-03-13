@@ -1,0 +1,529 @@
+---
+title: 'Design Principles'
+description: 'Core design philosophy behind the Bron Crypto library: redundancy, reusability, and interfaces'
+icon: 'lightbulb'
+---
+
+## Philosophy
+
+The Bron Crypto library is designed with three core principles that guide all architectural decisions:
+
+1. **Redundancy** - Multiple implementations for critical protocols
+2. **Reusability** - Modular, composable components
+3. **Interface-Driven Design** - Generic abstractions for flexibility
+
+These principles reflect the reality of working at the **frontier of cryptographic research** rather than in the domain of "settled" cryptography.
+
+## Principle 1: Redundancy
+
+### Why Redundancy?
+
+<Info>
+Since we operate at the frontier of cryptographic research rather than in the domain of "settled" cryptography, we plan for yet-unknown protocol-level vulnerabilities by providing alternative implementations that rely on different cryptographic assumptions and tools.
+</Info>
+
+Cryptographic protocols are complex. Even after rigorous analysis and formal proofs, subtle vulnerabilities can emerge:
+
+- Implementation flaws
+- Side-channel attacks
+- Cryptanalytic breakthroughs
+- Protocol-level weaknesses
+
+**Solution**: Provide multiple implementations with different trust assumptions.
+
+### Redundancy in Threshold ECDSA
+
+The library provides **three variants of DKLs23** threshold ECDSA:
+
+<CardGroup cols={3}>
+  <Card title="OT Extensions" icon="1">
+    **Location**: `pkg/mpc/tsig/tecdsa/dkls23/signing/interactive/sign_softspoken/`
+    
+    Uses Oblivious Transfer extensions (compatible with the original paper).
+    
+    **Trade-off**: Best performance for multiple signatures, requires OT setup.
+  </Card>
+  <Card title="Without OT" icon="2">
+    **Location**: `pkg/mpc/tsig/tecdsa/dkls23/signing/interactive/sign_bbot/`
+    
+    BBOT (Batched Base OT) variant without extensions.
+    
+    **Trade-off**: Simpler implementation, no OT extension overhead.
+  </Card>
+  <Card title="Inline Base OT" icon="3">
+    **Location**: `pkg/mpc/tsig/tecdsa/dkls23/signing/interactive/sign/`
+    
+    Generates base OT during signing.
+    
+    **Trade-off**: No preprocessing, self-contained protocol.
+  </Card>
+</CardGroup>
+
+Additionally, the library provides **Lindell17** as a completely different ECDSA protocol:
+
+<Accordion title="DKLs23 vs Lindell17">
+**DKLs23** (`pkg/mpc/tsig/tecdsa/dkls23/`):
+- Based on [2023 paper](https://eprint.iacr.org/2023/765)
+- Uses OT for multiplication
+- Fewer rounds, better performance
+- Relies on OT security assumptions
+
+**Lindell17** (`pkg/mpc/tsig/tecdsa/lindell17/`):
+- Based on [2017 paper](https://eprint.iacr.org/2017/552)  
+- Uses Paillier homomorphic encryption
+- Different security assumptions
+- Fallback if OT-based protocols are broken
+
+**Result**: If a vulnerability is found in one approach, applications can switch to the other.
+</Accordion>
+
+### Redundancy in Sigma Protocols
+
+Zero-knowledge proofs can be made non-interactive using different **compilers**:
+
+**Location**: `pkg/proofs/sigma/compiler/`
+
+<CardGroup cols={3}>
+  <Card title="Fiat-Shamir" icon="star">
+    **File**: `fiatshamir/`
+    
+    Standard transformation using hash functions.
+    
+    **Assumption**: Random Oracle Model
+  </Card>
+  <Card title="Fischlin" icon="shield">
+    **File**: `fischlin/`
+    
+    Online-extractable proofs.
+    
+    **Assumption**: Collision-resistant hash
+  </Card>
+  <Card title="Randomised Fischlin" icon="dice">
+    **File**: `randfischlin/`
+    
+    Improved efficiency variant.
+    
+    **Assumption**: Collision-resistant hash
+  </Card>
+</CardGroup>
+
+From the README:
+
+> Our [sigma protocols](/api/proofs/sigma-protocols) can be made non-interactive using different [compilers](/api/proofs/compilers) (Fiat-Shamir, Fischlin, Randomised Fischlin)
+
+**Benefit**: If the Random Oracle Model is found insufficient, switch to Fischlin-based compilers.
+
+## Principle 2: Reusability
+
+### Modular Design
+
+<Info>
+Cryptography code is typically written once, audited, and then forgotten. We aim for reusability through modular design.
+</Info>
+
+Cryptographic implementations are expensive:
+- Development time
+- Auditing costs
+- Formal verification
+- Ongoing maintenance
+
+**Solution**: Build reusable components that can be composed in multiple protocols.
+
+### Reusability in Number Theory
+
+The Chinese Remainder Theorem (CRT) and fast modular arithmetic are implemented independently:
+
+**Location**: `pkg/base/nt/`
+
+```
+nt/
+├── crt/              # Chinese Remainder Theorem
+├── modular/          # Fast modular arithmetic
+├── num/              # Big integer operations
+└── numct/            # Constant-time operations
+```
+
+**Current usage**:
+- **Paillier encryption** (`pkg/encryption/paillier/`) uses CRT for fast decryption
+- **Modular arithmetic** provides optimized operations
+
+**Future applications**:
+- RSA signatures and encryption
+- Other schemes requiring CRT optimization
+
+From the README:
+
+> Our CRT and fast modular arithmetic is implemented independently so that both [Paillier](/api/primitives/encryption) and future applications like RSA can use it.
+
+### Reusability in Sigma Protocols
+
+Sigma protocols are designed for maximum reusability through **composition**:
+
+**Location**: `pkg/proofs/sigma/compose/`
+
+<CardGroup cols={2}>
+  <Card title="AND Composition" icon="plus">
+    **File**: `sigand/`
+    
+    Prove knowledge of witnesses for **multiple statements** simultaneously.
+    
+    **Example**: Prove `x = g^w` AND `y = h^w`
+  </Card>
+  <Card title="OR Composition" icon="code-branch">
+    **File**: `sigor/`
+    
+    Prove knowledge of a witness for **one of many statements** without revealing which.
+    
+    **Example**: Prove "I know `w` such that `x = g^w` OR `y = h^w`"
+  </Card>
+</CardGroup>
+
+From the README:
+
+> Sigma protocols can be [composed](/api/proofs/composition) together (AND, OR) with minimal additional code.
+
+### Reusability Through Abstraction
+
+**Example**: Batch Schnorr proofs
+
+**Location**: `pkg/proofs/dlog/batch_schnorr/`
+
+Used in Gennaro DKG (`pkg/mpc/dkg/gennaro/`) to prove multiple discrete logarithms efficiently:
+
+```go
+// Prove knowledge of w₁, w₂, ..., wₙ such that:
+// X₁ = g^w₁, X₂ = g^w₂, ..., Xₙ = g^wₙ
+// In a single proof (batch verification)
+```
+
+**Benefits**:
+1. **Efficiency**: Batch verification is faster than individual proofs
+2. **Reusability**: Same code used in DKG and other protocols
+3. **Auditability**: One implementation to audit, multiple use cases
+
+## Principle 3: Interface-Driven Design
+
+### Generic Abstractions
+
+<Info>
+We have made extensive use of interfaces to maximally cover future applications.
+</Info>
+
+Go 1.18+ generics enable type-safe, flexible abstractions without runtime cost.
+
+### Commitment Scheme Interface
+
+**Location**: `pkg/commitments/commitments.go:62`
+
+```go
+type Scheme[K Key, W Witness, M Message, C Commitment[C], 
+    COM Committer[W, M, C], VF Verifier[W, M, C]] interface {
+    // Name returns the identifier of the commitment scheme.
+    Name() Name
+    
+    // Committer returns a committer configured with the scheme.
+    Committer(...CommitterOption[COM, W, M, C]) (COM, error)
+    
+    // Verifier returns a verifier compatible with commitments.
+    Verifier(...VerifierOption[VF, W, M, C]) (VF, error)
+    
+    // Key exposes the scheme key.
+    Key() K
+}
+```
+
+**Implementations**:
+- Pedersen commitments (`pkg/commitments/pedersen/`)
+- Hash-based commitments (`pkg/commitments/hash/`)
+- IND-CPA commitments (`pkg/commitments/indcpacom/`)
+
+**Future implementations**: Any commitment scheme can implement this interface.
+
+### Encryption Scheme Interface
+
+**Location**: `pkg/encryption/encryption.go:80`
+
+```go
+type Scheme[
+    SK PrivateKey[SK], PK PublicKey[PK], 
+    M Plaintext, C Ciphertext[C], N Nonce,
+    KG KeyGenerator[SK, PK], 
+    ENC Encrypter[PK, M, C, N], 
+    DEC Decrypter[M, C],
+] interface {
+    Name() Name
+    Keygen(...KeyGeneratorOption[KG, SK, PK]) (KG, error)
+    Encrypter(...EncrypterOption[ENC, PK, M, C, N]) (ENC, error)
+    Decrypter(SK, ...DecrypterOption[DEC, M, C]) (DEC, error)
+}
+```
+
+**Current implementations**:
+- Paillier (`pkg/encryption/paillier/`)
+- HPKE (`pkg/encryption/hpke/`)
+
+**Future implementations**: RSA, ElGamal, or any public-key scheme
+
+### Homomorphic Extensions
+
+Interfaces support **optional capabilities** through extension interfaces:
+
+**Location**: `pkg/encryption/encryption.go:124`
+
+```go
+type HomomorphicScheme[
+    SK PrivateKey[SK], PK PublicKey[PK],
+    M HomomorphicPlaintext[M, MV], MV algebra.SemiGroupElement[MV],
+    C HomomorphicCiphertext[C, CV, S], CV algebra.MonoidElement[CV],
+    N Nonce, NV algebra.SemiGroupElement[NV],
+    KG KeyGenerator[SK, PK], 
+    ENC Encrypter[PK, M, C, N], 
+    DEC Decrypter[M, C], 
+    S algebra.NatLike[S],
+] Scheme[SK, PK, M, C, N, KG, ENC, DEC]
+```
+
+Paillier implements `HomomorphicScheme` and gains:
+- `HomAdd` - Add ciphertexts
+- `HomSub` - Subtract ciphertexts  
+- `ScalarMul` - Multiply by scalar
+
+**Non-homomorphic** schemes (like RSA) implement only the base `Scheme` interface.
+
+### Algebraic Abstractions
+
+**Location**: `pkg/base/algebra/`
+
+Generic algebraic structures used throughout:
+
+```go
+type Group[G any] interface {
+    Identity() G
+    Op(G, G) G
+    Inverse(G) G
+}
+
+type Field[F any] interface {
+    Ring[F]
+    Inverse(F) F  // Multiplicative inverse
+}
+
+type PrimeGroupElement[G, S any] interface {
+    GroupElement[G]
+    ScalarOp(S) G  // Scalar multiplication
+}
+```
+
+**Benefit**: Write protocol code that works with **any** compatible curve or field.
+
+### Interface Benefits
+
+<CardGroup cols={2}>
+  <Card title="Type Safety" icon="shield-check">
+    Compile-time checking prevents type mismatches.
+    
+    Generic constraints ensure correct usage.
+  </Card>
+  <Card title="Flexibility" icon="arrows-rotate">
+    Swap implementations without changing protocol code.
+    
+    Support new schemes by implementing interfaces.
+  </Card>
+  <Card title="Composability" icon="puzzle-piece">
+    Mix and match components.
+    
+    Build complex protocols from simple pieces.
+  </Card>
+  <Card title="Future-Proofing" icon="forward">
+    Interfaces accommodate future schemes.
+    
+    Add capabilities without breaking existing code.
+  </Card>
+</CardGroup>
+
+## Stateless Protocol Design
+
+### Why Stateless?
+
+Threshold signing protocols are designed to be **stateless**:
+
+<Info>
+The design of threshold signing protocols are stateless. Orchestrating them is not in scope of this library; this includes implementation of the networking layer as well.
+</Info>
+
+**Benefits**:
+1. **Simplicity**: No persistent state management
+2. **Reliability**: Easy to recover from failures
+3. **Flexibility**: Applications control orchestration
+4. **Parallelism**: Multiple protocol instances can run simultaneously
+
+### Separation of Concerns
+
+The library focuses on **protocol logic**, not orchestration:
+
+**In scope**:
+- Cryptographic operations
+- Protocol state transitions
+- Message generation and verification
+
+**Out of scope** (left to applications):
+- Network transport (TCP, WebSockets, gRPC)
+- Message routing and delivery
+- Fault tolerance and retries
+- Persistent storage
+
+### Networking Abstractions
+
+**Location**: `pkg/network/`
+
+Provides minimal abstractions:
+
+- `Router` - Route messages between parties
+- `SID` - Session identifiers
+- `Echo Broadcast` - Broadcast channel implementation
+
+From the README:
+
+> For example, to establish the broadcast channel one typically has to do [Echo-Broadcast](/guides/networking) yet this is implemented as a separate package.
+
+**Responsibility**: Applications must implement actual transport.
+
+## Practical Examples
+
+### Example 1: Choosing ECDSA Variants
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tecdsa/dkls23"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tecdsa/lindell17"
+)
+
+// Start with DKLs23 for performance
+protocol := dkls23.NewProtocol(...)
+
+// If OT-related issues arise, switch to Lindell17
+// protocol := lindell17.NewProtocol(...)
+
+// Protocol interface remains the same!
+```
+
+### Example 2: Composing Sigma Protocols
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/proofs/dlog/schnorr"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compose/sigand"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compiler/fiatshamir"
+)
+
+// Create two Schnorr proofs
+proof1 := schnorr.NewProtocol(g, rand.Reader)
+proof2 := schnorr.NewProtocol(h, rand.Reader)
+
+// Compose with AND
+composed := sigand.Compose(proof1, proof2)
+
+// Make non-interactive with Fiat-Shamir  
+nizkp := fiatshamir.Compile(composed)
+
+// Minimal code, maximum reusability!
+```
+
+### Example 3: Reusing CRT
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/base/nt/crt"
+
+// Used in Paillier decryption
+func (sk *PrivateKey) Decrypt(ct *Ciphertext) *Plaintext {
+    // CRT optimization for mod n² operations
+    result := crt.Reconstruct(sk.p, sk.q, ...)
+    return plaintextFromCRT(result)
+}
+
+// Future: Same CRT code in RSA
+func RSADecrypt(sk *RSAKey, ct *RSACiphertext) []byte {
+    result := crt.Reconstruct(sk.p, sk.q, ...)
+    return result.Bytes()
+}
+```
+
+## Design Trade-offs
+
+### Trade-off: Redundancy vs Code Size
+
+**Cost**: Multiple implementations increase:
+- Code maintenance burden
+- Binary size
+- Testing complexity
+
+**Benefit**: Protection against protocol-level failures
+
+**Decision**: Accept higher maintenance cost for security benefits at the research frontier.
+
+### Trade-off: Abstraction vs Performance
+
+**Cost**: Generic interfaces and abstractions may:
+- Add indirection overhead
+- Limit some optimizations
+- Increase compile times
+
+**Benefit**: 
+- Type safety
+- Code reuse
+- Future flexibility
+
+**Decision**: Use abstractions where they provide clear benefits; optimize hot paths.
+
+### Trade-off: Stateless vs Convenient
+
+**Cost**: Stateless design requires:
+- Applications to manage orchestration
+- More boilerplate for simple use cases
+- External state management
+
+**Benefit**:
+- Flexibility for complex deployments  
+- Easier error recovery
+- No hidden state
+
+**Decision**: Provide stateless protocols; applications can build convenient wrappers.
+
+## Summary
+
+The three design principles work together:
+
+<CardGroup cols={3}>
+  <Card title="Redundancy" icon="shield">
+    Multiple implementations with different assumptions
+    
+    **Result**: Resilient to protocol-level vulnerabilities
+  </Card>
+  <Card title="Reusability" icon="recycle">
+    Modular components that compose
+    
+    **Result**: Efficient development and auditing
+  </Card>
+  <Card title="Interfaces" icon="plug">
+    Generic abstractions for flexibility
+    
+    **Result**: Future-proof architecture
+  </Card>
+</CardGroup>
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    How design principles map to package structure
+  </Card>
+  <Card title="Security Model" icon="shield-halved" href="/concepts/security">
+    Understanding security boundaries and guarantees
+  </Card>
+  <Card title="Threshold Cryptography" icon="users" href="/concepts/threshold-cryptography">
+    Protocols built with these principles
+  </Card>
+  <Card title="Zero-Knowledge Proofs" icon="eye-slash" href="/concepts/zero-knowledge-proofs">
+    Composable proof systems
+  </Card>
+</CardGroup>

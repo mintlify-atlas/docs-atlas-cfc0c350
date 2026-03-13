@@ -1,0 +1,613 @@
+---
+title: 'Zero-Knowledge Proofs'
+description: 'Understanding zero-knowledge proofs, sigma protocols, and proof composition in Bron Crypto'
+icon: 'eye-slash'
+---
+
+## What are Zero-Knowledge Proofs?
+
+A **zero-knowledge proof** allows a prover to convince a verifier that a statement is true **without revealing any information beyond the truth of the statement**.
+
+<Info>
+**Example**: Prove "I know the password" without revealing the password itself, or any information that would help someone else guess it.
+</Info>
+
+## Core Properties
+
+A zero-knowledge proof must satisfy three properties:
+
+<CardGroup cols={3}>
+  <Card title="Completeness" icon="check">
+    If the statement is true and both parties are honest, the verifier will accept.
+  </Card>
+  <Card title="Soundness" icon="shield">
+    If the statement is false, no cheating prover can convince the verifier (except with negligible probability).
+  </Card>
+  <Card title="Zero-Knowledge" icon="eye-slash">
+    The verifier learns nothing except that the statement is true.
+  </Card>
+</CardGroup>
+
+## Sigma Protocols
+
+**Location**: `pkg/proofs/sigma/`
+
+Sigma protocols (Σ-protocols) are a class of **three-round public-coin** interactive proofs:
+
+### Protocol Structure
+
+From `pkg/proofs/sigma/sigma.go:39`:
+
+```go
+type Protocol[X Statement, W Witness, A Commitment, 
+              S State, Z Response] interface {
+    // Prover commits to randomness
+    ComputeProverCommitment(statement X, witness W) (A, S, error)
+    
+    // Prover responds to challenge
+    ComputeProverResponse(statement X, witness W, 
+        commitment A, state S, challenge ChallengeBytes) (Z, error)
+    
+    // Verifier checks the proof
+    Verify(statement X, commitment A, 
+        challenge ChallengeBytes, response Z) error
+}
+```
+
+### Three Rounds
+
+<Steps>
+  <Step title="Commitment (Prover → Verifier)">
+    Prover generates commitment `a` using randomness `r`:
+    - Computes `a = g^r` (e.g., in Schnorr proof)
+    - Sends `a` to verifier
+    - Keeps state `s` (includes `r`)
+  </Step>
+  
+  <Step title="Challenge (Verifier → Prover)">
+    Verifier sends random challenge `e`:
+    - Typically a random string or scalar
+    - Public-coin: challenge is just random bits
+  </Step>
+  
+  <Step title="Response (Prover → Verifier)">
+    Prover computes response `z`:
+    - Combines witness and randomness: `z = r + e·w`
+    - Sends `z` to verifier
+    - Verifier checks: `g^z = a · X^e`
+  </Step>
+</Steps>
+
+### Honest-Verifier Zero-Knowledge
+
+Sigma protocols are **Honest-Verifier Zero-Knowledge (HVZK)**:
+
+**Simulator**: Can generate transcripts `(a, e, z)` indistinguishable from real proofs, without knowing witness `w`.
+
+From `pkg/proofs/sigma/sigma.go:45`:
+
+```go
+// RunSimulator produces transcript without witness
+// "Rewinds" by choosing response first, then computing commitment
+RunSimulator(statement X, challenge ChallengeBytes) (A, Z, error)
+```
+
+**How simulation works**:
+1. Choose random response `z`
+2. Choose challenge `e`  
+3. Compute `a = g^z / X^e` (work backwards)
+4. Output `(a, e, z)`
+
+This transcript is indistinguishable from a real proof!
+
+## Special Soundness
+
+Sigma protocols have **special soundness**: given multiple transcripts with the same commitment but different challenges, can extract the witness.
+
+From `pkg/proofs/sigma/sigma.go:55`:
+
+```go
+// SpecialSoundness returns n for which protocol has n-special soundness
+// n = number of transcripts needed to extract witness
+SpecialSoundness() uint
+```
+
+**Example**: Schnorr proof has 2-special soundness:
+- Given `(a, e₁, z₁)` and `(a, e₂, z₂)` with `e₁ ≠ e₂`
+- Can extract witness: `w = (z₁ - z₂)/(e₁ - e₂)`
+
+## Schnorr Proofs
+
+**Location**: `pkg/proofs/dlog/schnorr/`
+
+### Proof of Knowledge of Discrete Logarithm
+
+**Statement**: "I know `w` such that `X = g^w`"
+
+**Public**: Generator `g`, public key `X`  
+**Secret**: Witness `w` (discrete logarithm)
+
+From `pkg/proofs/dlog/schnorr/protocol.go:16`:
+
+```go
+const Name sigma.Name = "SCHNORR" + dlog.Type
+
+type Witness[S algebra.PrimeFieldElement[S]] struct {
+    W S  // Secret scalar
+}
+
+type Statement[G algebra.PrimeGroupElement[G, S], 
+               S algebra.PrimeFieldElement[S]] struct {
+    X G  // Public group element
+}
+```
+
+### Schnorr Protocol
+
+**Prover** (knows `w` such that `X = g^w`):
+
+1. **Commitment**: Choose random `r`, compute `a = g^r`, send `a`
+2. **Challenge**: Receive random `e` from verifier
+3. **Response**: Compute `z = r + e·w`, send `z`
+
+**Verifier**:
+- Check: `g^z = a · X^e`
+- Rearranging: `g^z = g^r · g^{e·w} = g^{r+e·w}` ✓
+
+**Zero-knowledge**: Simulator can generate `(a, e, z)` without `w` by:
+1. Choose random `z` and `e`
+2. Compute `a = g^z / X^e`
+
+From `pkg/proofs/dlog/schnorr/protocol.go:48`:
+
+```go
+func NewProtocol[G algebra.PrimeGroupElement[G, S], 
+                 S algebra.PrimeFieldElement[S]](
+    generator G, 
+    prng io.Reader,
+) (*Protocol[G, S], error) {
+    // Setup protocol with generator and randomness source
+    // ...
+}
+```
+
+### Batch Schnorr Proofs
+
+**Location**: `pkg/proofs/dlog/batch_schnorr/`
+
+**Goal**: Prove knowledge of **multiple** discrete logarithms efficiently:
+
+**Statement**: "I know `w₁, w₂, ..., wₙ` such that `Xᵢ = g^{wᵢ}` for all `i`"
+
+**Naive approach**: Run `n` separate Schnorr proofs  
+**Better approach**: Batch proof with single challenge
+
+**Efficiency**:
+- **Proof size**: ~1 group element + n scalars (vs. n group elements + n scalars)
+- **Verification**: Batch verification faster than n individual checks
+
+**Used in**: Gennaro DKG (`pkg/mpc/dkg/gennaro/`) to prove well-formedness of verification vectors.
+
+## Non-Interactive Proofs
+
+### The Fiat-Shamir Transform
+
+**Location**: `pkg/proofs/sigma/compiler/fiatshamir/`
+
+**Problem**: Interactive proofs require back-and-forth communication.
+
+**Solution**: Replace verifier's random challenge with hash of transcript.
+
+**Transformation**:
+1. Prover computes commitment `a`
+2. Prover computes challenge: `e = H(statement, a)`  
+3. Prover computes response `z` using `e`
+4. Proof is `(a, z)`; verifier recomputes `e = H(statement, a)` and checks
+
+**Security**: Relies on **Random Oracle Model** - hash function behaves like random oracle.
+
+From `pkg/proofs/sigma/sigma.go:61`:
+
+```go
+// SoundnessError returns statistical soundness error
+// For interactive: ≥ base.StatisticalSecurity
+// For non-interactive: ≥ base.ComputationalSecurity  
+SoundnessError() uint
+```
+
+**Why higher security for non-interactive?**
+- Interactive: Attacker must succeed during live interaction
+- Non-interactive: Attacker can try unlimited offline attempts
+
+From `pkg/proofs/dlog/schnorr/protocol.go:52`:
+
+```go
+// To make it non-interactive, challenge must be ≥ computational security
+challengeByteLen := base.ComputationalSecurityBytesCeil
+soundnessError := uint(challengeByteLen * 8)  // 128 bits
+```
+
+### Alternative Compilers
+
+The library provides multiple ways to make proofs non-interactive:
+
+<CardGroup cols={3}>
+  <Card title="Fiat-Shamir" icon="hashtag">
+    **Location**: `compiler/fiatshamir/`
+    
+    Standard transformation
+    
+    **Assumption**: Random Oracle Model
+  </Card>
+  <Card title="Fischlin" icon="shield-halved">
+    **Location**: `compiler/fischlin/`
+    
+    Online-extractable proofs
+    
+    **Assumption**: Collision-resistant hash
+  </Card>
+  <Card title="Randomised Fischlin" icon="dice">
+    **Location**: `compiler/randfischlin/`
+    
+    Improved efficiency
+    
+    **Assumption**: Collision-resistant hash
+  </Card>
+</CardGroup>
+
+**Why multiple compilers?** Protocol diversity (see [Design Principles](/concepts/design-principles)):
+- If Random Oracle Model is insufficient, switch to Fischlin
+- Different security models and assumptions
+
+## Proof Composition
+
+**Location**: `pkg/proofs/sigma/compose/`
+
+Sigma protocols can be **composed** to prove complex statements:
+
+### AND Composition
+
+**Location**: `compose/sigand/`
+
+**Goal**: Prove multiple statements simultaneously.
+
+**Example**: Prove "I know `w₁` such that `X₁ = g^{w₁}` **AND** `w₂` such that `X₂ = g^{w₂}`"
+
+**Protocol**:
+1. Run both proofs in parallel with **same challenge**
+2. Proof is `((a₁, a₂), e, (z₁, z₂))`
+
+**Composition**:
+```go
+import "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compose/sigand"
+
+proof1 := schnorr.NewProtocol(g, rand.Reader)
+proof2 := schnorr.NewProtocol(h, rand.Reader)
+
+// Compose with AND
+andProof := sigand.Compose(proof1, proof2)
+
+// Now can prove both statements together
+```
+
+### OR Composition  
+
+**Location**: `compose/sigor/`
+
+**Goal**: Prove **at least one** of multiple statements, without revealing which.
+
+**Example**: "I know `w₁` such that `X₁ = g^{w₁}` **OR** `w₂` such that `X₂ = g^{w₂}` (but not saying which)"
+
+**Use case**: Ring signatures, deniability, privacy-preserving authentication.
+
+**Protocol** (2-way OR):
+1. Prover knows witness for statement 1 (but not 2)
+2. **Real proof** for statement 1: Generate commitment `a₁`
+3. **Simulated proof** for statement 2: Choose `e₂, z₂` and compute `a₂ = g^{z₂}/X₂^{e₂}`
+4. Split challenge: `e₁ = e ⊕ e₂`
+5. Complete real proof: `z₁ = r₁ + e₁·w₁`
+6. Send `(a₁, a₂, e₂, z₁, z₂)`
+
+**Verifier**: Checks both proofs with challenges `e₁ = e ⊕ e₂` and `e₂`.
+
+**Zero-knowledge**: Simulated proof is indistinguishable from real, so verifier can't tell which statement prover knows.
+
+## Proofs in MPC Protocols
+
+Zero-knowledge proofs are essential for security against **malicious adversaries**.
+
+### Use Case 1: Distributed Key Generation
+
+**Location**: `pkg/mpc/dkg/gennaro/`
+
+From the README:
+
+> Dealers privately send Pedersen shares, lift the dealer polynomial into the exponent, and broadcast a Feldman verification vector with a **batch Schnorr proof**.
+
+**Why needed**: Prove that Feldman vector correctly represents the Pedersen dealing.
+
+**Without proof**: Malicious dealer could send inconsistent Feldman vector, breaking security.
+
+**With proof**: Parties verify that dealer behaved correctly before accepting shares.
+
+### Use Case 2: Paillier Proofs
+
+**Location**: `pkg/proofs/paillier/`
+
+Threshold ECDSA (Lindell17) uses Paillier encryption and needs proofs:
+
+```
+pkg/proofs/paillier/
+├── lp/          # Log-order proof
+├── lpdl/        # Lindell Pedersen-DL proof  
+├── nthroot/     # N-th root proof
+├── pailliern/   # Paillier N proof
+└── range/       # Range proof
+```
+
+**Examples**:
+- **Range proof**: Prove ciphertext encrypts value in range `[0, 2^k)` without revealing value
+- **N-th root proof**: Prove modulus is product of two primes
+- **LP proof**: Prove correct Paillier encryption with committed randomness
+
+**Why needed**: Prevent malicious parties from:
+- Encrypting out-of-range values
+- Using malformed keys
+- Breaking protocol security
+
+### Use Case 3: Commitment Verification
+
+Commitments often need proofs to show relationship between committed values:
+
+**Example**: Prove "Commitment `C` commits to same value as public key `X = g^w`"
+
+**Solution**: Sigma protocol proving `C = Commit(w, r)` and `X = g^w` for same `w`.
+
+## Practical Examples
+
+### Example 1: Simple Schnorr Proof
+
+```go
+import (
+    "crypto/rand"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/dlog/schnorr"
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+)
+
+// Setup curve
+curve := k256.NewCurve()
+generator := curve.Generator()
+
+// Prover has secret witness w
+witness := curve.ScalarField().Random(rand.Reader)
+publicKey := generator.ScalarOp(witness)
+
+// Create protocol
+protocol, _ := schnorr.NewProtocol(generator, rand.Reader)
+
+statement := schnorr.NewStatement(publicKey)
+witnessObj := schnorr.NewWitness(witness)
+
+// Prover: Generate commitment
+commitment, state, _ := protocol.ComputeProverCommitment(
+    statement, witnessObj,
+)
+
+// Verifier: Send random challenge
+challenge := make([]byte, protocol.GetChallengeBytesLength())
+rand.Read(challenge)
+
+// Prover: Compute response
+response, _ := protocol.ComputeProverResponse(
+    statement, witnessObj, commitment, state, challenge,
+)
+
+// Verifier: Verify
+err := protocol.Verify(statement, commitment, challenge, response)
+if err == nil {
+    println("Proof accepted!")
+}
+```
+
+### Example 2: Non-Interactive Proof
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compiler/fiatshamir"
+
+// Make protocol non-interactive with Fiat-Shamir
+niProtocol := fiatshamir.Compile(protocol)
+
+// Prover generates full proof at once
+proof, _ := niProtocol.Prove(statement, witness)
+
+// Proof can be sent/stored
+proofBytes := proof.Bytes()
+
+// Verifier checks later (no interaction)
+err := niProtocol.Verify(statement, proof)
+```
+
+### Example 3: AND Composition
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compose/sigand"
+
+// Prove two statements with same witness
+g := curve.Generator()
+h := curve.AnotherGenerator()  // Independent generator
+
+w := curve.ScalarField().Random(rand.Reader)
+X := g.ScalarOp(w)  // X = g^w
+Y := h.ScalarOp(w)  // Y = h^w (same w!)
+
+// Create two Schnorr protocols
+proof1, _ := schnorr.NewProtocol(g, rand.Reader)
+proof2, _ := schnorr.NewProtocol(h, rand.Reader)
+
+// Compose with AND
+andProof := sigand.Compose(proof1, proof2)
+
+// Prove both X = g^w AND Y = h^w
+statements := (schnorr.NewStatement(X), schnorr.NewStatement(Y))
+witnesses := (schnorr.NewWitness(w), schnorr.NewWitness(w))
+
+commitment, state, _ := andProof.ComputeProverCommitment(
+    statements, witnesses,
+)
+// ... rest of protocol ...
+```
+
+## Security Considerations
+
+### Soundness Error
+
+**Interactive proofs**: Challenge space must be large enough to prevent guessing.
+
+From `pkg/base/constants.go`:
+```go
+const StatisticalSecurity = 80  // bits for interactive proofs
+const ComputationalSecurity = 128  // bits for non-interactive
+```
+
+**Why different?**
+- Interactive: Attacker gets one shot per interaction
+- Non-interactive: Attacker can try unlimited times offline
+
+### Domain Separation
+
+From `pkg/proofs/sigma/sigma.go:10`:
+
+```go
+const (
+    transcriptLabel = "BRON_CRYPTO_SIGMA_POK-"
+    statementLabel  = "statementLabel-"
+    commitmentLabel = "commitmentLabel-"  
+    challengeLabel  = "challengeLabel-"
+    responseLabel   = "responseLabel-"
+)
+```
+
+**Why needed**: Prevent cross-protocol attacks where proof for one statement is replayed in different protocol.
+
+**Implementation**: Hash inputs with unique labels:
+```
+e = H(transcriptLabel || statementLabel || statement || 
+      commitmentLabel || commitment)
+```
+
+### Witness Indistinguishability vs Zero-Knowledge
+
+**Witness Indistinguishable (WI)**: If statement has multiple witnesses, proof doesn't reveal which witness was used.
+
+**Zero-Knowledge (ZK)**: Proof reveals nothing beyond truth of statement.
+
+**Relationship**: ZK implies WI, but WI is weaker.
+
+**In OR proofs**: Inherently WI (can't tell which branch has witness).
+
+## Advanced Topics
+
+### Maurer's Framework
+
+**Location**: `pkg/proofs/internal/meta/maurer09/`
+
+Maurer's framework for constructing sigma protocols for **linear homomorphisms**.
+
+**General form**: Prove knowledge of `w` such that `φ(w) = X` for public homomorphism `φ`.
+
+**Covers**:
+- Schnorr proofs (`φ(w) = g^w`)
+- Okamoto proofs (`φ(w₁, w₂) = g^{w₁}h^{w₂}`)
+- Pedersen commitment opening
+
+From `pkg/proofs/dlog/schnorr/protocol.go:44`:
+
+```go
+type Protocol[G algebra.PrimeGroupElement[G, S], 
+              S algebra.PrimeFieldElement[S]] struct {
+    maurer09.Protocol[G, S]  // Built on Maurer framework
+}
+```
+
+### Okamoto Proofs
+
+**Location**: `pkg/proofs/okamoto/`
+
+**Statement**: "I know `w₁, w₂` such that `X = g^{w₁}h^{w₂}`"
+
+**Use case**: Prove knowledge of Pedersen commitment opening.
+
+**Extension of Schnorr**: Two witnesses instead of one.
+
+### Bulletproofs (Future)
+
+Not yet implemented, but interfaces designed to accommodate:
+- Range proofs with logarithmic size
+- Inner product arguments
+- Aggregation of multiple range proofs
+
+## Best Practices
+
+### 1. Always Verify Proofs
+
+```go
+// Good: Verify before accepting
+err := protocol.Verify(statement, commitment, challenge, response)
+if err != nil {
+    return fmt.Errorf("proof verification failed: %w", err)
+}
+
+// Bad: Trusting unverified proofs
+// processData(unverifiedData)  // DANGEROUS!
+```
+
+### 2. Use Sufficient Security Parameters
+
+```go
+// Interactive proofs: 80-bit challenges
+challenge := make([]byte, base.StatisticalSecurityBytesCeil)
+
+// Non-interactive proofs: 128-bit challenges  
+challenge := make([]byte, base.ComputationalSecurityBytesCeil)
+```
+
+### 3. Domain Separation
+
+```go
+// Include context in Fiat-Shamir hash
+context := []byte("MyProtocol-v1.0-ProofType")
+hash := sha256.New()
+hash.Write(context)
+hash.Write(statement.Bytes())
+hash.Write(commitment.Bytes())
+challenge := hash.Sum(nil)
+```
+
+### 4. Batch Verification When Possible
+
+```go
+// Instead of verifying n proofs individually:
+for _, proof := range proofs {
+    protocol.Verify(statement, proof)  // Slow
+}
+
+// Use batch verification:
+batchProtocol.BatchVerify(statements, proofs)  // Much faster
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Threshold Cryptography" icon="users" href="/concepts/threshold-cryptography">
+    How ZKPs enable secure threshold protocols
+  </Card>
+  <Card title="MPC Fundamentals" icon="handshake" href="/concepts/mpc">
+    Zero-knowledge proofs in multi-party computation
+  </Card>
+  <Card title="Design Principles" icon="lightbulb" href="/concepts/design-principles">
+    Why multiple proof compilers (redundancy)
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    ZKP package structure and organization
+  </Card>
+</CardGroup>

@@ -1,0 +1,481 @@
+---
+title: "Building"
+description: "Build options and configurations for Bron Crypto"
+---
+
+## Build System Overview
+
+Bron Crypto uses a Makefile-based build system that handles:
+
+- BoringSSL compilation and vendoring
+- CGO flag injection for C/C++ linking
+- Go package compilation
+- Test execution
+- Code generation
+
+<Info>
+  All build targets automatically inject the required CGO flags for BoringSSL, so you don't need to set them manually.
+</Info>
+
+## Core Build Targets
+
+### Build Everything
+
+Compile all Go packages with BoringSSL linking:
+
+```bash
+make build
+```
+
+This target:
+1. Builds BoringSSL (if not already built)
+2. Sets `CGO_CFLAGS` to include BoringSSL headers
+3. Sets `CGO_LDFLAGS` to link against `libcrypto.a`
+4. Compiles all packages in the repository
+
+### Build BoringSSL Only
+
+Build just the BoringSSL dependency:
+
+```bash
+make build-boringssl
+```
+
+**Build Process:**
+
+<Steps>
+  <Step title="Clone BoringSSL">
+    Clones BoringSSL at the pinned tag (`0.20251124.0`) from:
+    ```
+    https://github.com/google/boringssl
+    ```
+    
+    Output location: `thirdparty/boringssl/`
+  </Step>
+  
+  <Step title="Configure with CMake">
+    Runs CMake with optimizations:
+    ```bash
+    cmake thirdparty/boringssl/ \
+      -DCMAKE_BUILD_TYPE=Release \
+      -DOPENSSL_SMALL=1 \
+      -GNinja \
+      -B thirdparty/boringssl/build/
+    ```
+  </Step>
+  
+  <Step title="Build with Ninja">
+    Compiles the crypto library:
+    ```bash
+    ninja -C thirdparty/boringssl/build/ crypto
+    ```
+    
+    Output: `thirdparty/boringssl/build/libcrypto.a`
+  </Step>
+</Steps>
+
+### Generate Code
+
+Regenerate auto-generated code and test vectors:
+
+```bash
+make generate
+```
+
+<Warning>
+  Code generation is typically only needed when modifying core primitives or security parameters. Requires Docker for some generators.
+</Warning>
+
+## Build Configuration
+
+### Environment Variables
+
+The build system uses these variables:
+
+<ParamField path="BRON_CRYPTO_HOME" type="string" default="Current directory">
+  Root directory of the repository
+</ParamField>
+
+<ParamField path="BORINGSSL_TAG" type="string" default="0.20251124.0">
+  BoringSSL git tag to use
+</ParamField>
+
+<ParamField path="BORINGSSL_HOME" type="string" default="thirdparty/boringssl/">
+  Directory where BoringSSL is cloned
+</ParamField>
+
+<ParamField path="BUILD_PREFIX" type="string" default="">
+  Prefix for build artifacts (e.g., `docker-` for isolated Docker builds)
+</ParamField>
+
+### CGO Flags
+
+The Makefile automatically sets these CGO flags:
+
+```makefile
+CGO_CFLAGS="-I$(abspath ${BORINGSSL_INCLUDE})"
+CGO_LDFLAGS="-L$(abspath ${BORINGSSL_LIB}) -lcrypto"
+```
+
+**Breakdown:**
+
+- `CGO_CFLAGS`: Tells the C compiler where to find BoringSSL headers
+- `CGO_LDFLAGS`: Tells the linker where to find `libcrypto.a` and to link it
+
+## Build Variants
+
+### Standard Build
+
+Default build for local development:
+
+```bash
+make build
+```
+
+Artifacts in: `thirdparty/boringssl/build/`
+
+### Docker Build
+
+Isolated build in a container:
+
+```bash
+./run-in-docker.sh make build
+```
+
+Artifacts in: `thirdparty/boringssl/docker-build/`
+
+<Info>
+  Docker builds use `BUILD_PREFIX=docker-` to keep artifacts separate from host builds.
+</Info>
+
+### Custom Build Prefix
+
+Use a custom prefix for artifacts:
+
+```bash
+BUILD_PREFIX=myprefix- make build
+```
+
+Artifacts in: `thirdparty/boringssl/myprefix-build/`
+
+## Advanced Build Options
+
+### Parallel Builds
+
+Ninja automatically parallelizes the BoringSSL build. For Go compilation, use:
+
+```bash
+go build -p 8 ./...
+```
+
+Or let Go auto-detect:
+
+```bash
+go build ./...
+```
+
+### Build for Specific Platforms
+
+<CodeGroup>
+```bash Linux (x86_64)
+make build
+```
+
+```bash Linux (ARM64)
+GOARCH=arm64 make build
+```
+
+```bash macOS (Apple Silicon)
+make build
+```
+
+```bash Windows (cross-compile)
+GOOS=windows GOARCH=amd64 CGO_ENABLED=1 CC=x86_64-w64-mingw32-gcc make build
+```
+</CodeGroup>
+
+<Warning>
+  Cross-compilation requires a C cross-compiler for the target platform due to CGO.
+</Warning>
+
+### Static Linking
+
+BoringSSL is statically linked by default (`libcrypto.a`). No additional configuration needed.
+
+## Build Artifacts
+
+### BoringSSL Outputs
+
+```
+thirdparty/boringssl/
+├── build/                  # Build artifacts
+│   ├── libcrypto.a        # Static crypto library (linked)
+│   ├── CMakeFiles/        # CMake intermediate files
+│   └── ...
+├── include/               # Headers
+│   └── openssl/
+│       ├── aes.h
+│       ├── bn.h
+│       └── ...
+└── src/                   # Source code (cloned)
+```
+
+### Go Build Cache
+
+Go caches compiled packages in:
+
+```bash
+$(go env GOCACHE)
+```
+
+Clear the cache:
+
+```bash
+go clean -cache
+```
+
+## Makefile Targets Reference
+
+<ResponseField name="all" type="default">
+  Builds everything and generates SBOM
+  ```bash
+  make all
+  ```
+</ResponseField>
+
+<ResponseField name="build" type="primary">
+  Builds BoringSSL and compiles all Go packages
+  ```bash
+  make build
+  ```
+</ResponseField>
+
+<ResponseField name="build-boringssl">
+  Builds only the BoringSSL dependency
+  ```bash
+  make build-boringssl
+  ```
+</ResponseField>
+
+<ResponseField name="generate">
+  Runs `go generate` on all packages
+  ```bash
+  make generate
+  ```
+</ResponseField>
+
+<ResponseField name="test">
+  Runs all tests with CGO flags
+  ```bash
+  make test
+  ```
+</ResponseField>
+
+<ResponseField name="test-race">
+  Runs tests with race detection
+  ```bash
+  make test-race
+  ```
+</ResponseField>
+
+<ResponseField name="bench">
+  Runs benchmarks
+  ```bash
+  make bench
+  ```
+</ResponseField>
+
+<ResponseField name="coverage">
+  Generates test coverage report
+  ```bash
+  make coverage
+  ```
+</ResponseField>
+
+<ResponseField name="lint">
+  Runs golangci-lint
+  ```bash
+  make lint
+  ```
+</ResponseField>
+
+<ResponseField name="lint-fix">
+  Auto-fixes linting issues
+  ```bash
+  make lint-fix
+  ```
+</ResponseField>
+
+<ResponseField name="clean">
+  Cleans build artifacts
+  ```bash
+  make clean
+  ```
+  
+  Removes:
+  - Go build cache
+  - BoringSSL directory and all artifacts
+</ResponseField>
+
+## Troubleshooting Builds
+
+<AccordionGroup>
+  <Accordion title="CMake or Ninja not found" icon="triangle-exclamation">
+    **Error**: 
+    ```
+    make: cmake: Command not found
+    make: ninja: Command not found
+    ```
+    
+    **Solution**: Install CMake and Ninja:
+    
+    ```bash
+    # Ubuntu/Debian
+    sudo apt-get install cmake ninja-build
+    
+    # macOS
+    brew install cmake ninja
+    
+    # Fedora/RHEL
+    sudo dnf install cmake ninja-build
+    ```
+  </Accordion>
+  
+  <Accordion title="BoringSSL build fails" icon="triangle-exclamation">
+    **Error**: 
+    ```
+    ninja: error: loading 'build.ninja': No such file or directory
+    ```
+    
+    **Solution**: Clean and rebuild:
+    
+    ```bash
+    make clean
+    make build-boringssl
+    ```
+  </Accordion>
+  
+  <Accordion title="CGO linking errors" icon="triangle-exclamation">
+    **Error**: 
+    ```
+    undefined reference to 'CRYPTO_...'
+    ```
+    
+    **Solution**: Ensure BoringSSL is built before Go compilation:
+    
+    ```bash
+    make build-boringssl
+    make build
+    ```
+    
+    Or use the combined target:
+    ```bash
+    make build  # Automatically builds BoringSSL first
+    ```
+  </Accordion>
+  
+  <Accordion title="Out of memory during build" icon="triangle-exclamation">
+    **Error**: 
+    ```
+    c++: fatal error: Killed signal terminated program cc1plus
+    ```
+    
+    **Solution**: Limit Ninja parallelism:
+    
+    ```bash
+    ninja -C thirdparty/boringssl/build/ -j 2 crypto
+    ```
+  </Accordion>
+  
+  <Accordion title="Wrong BoringSSL version" icon="triangle-exclamation">
+    **Error**: Linking against a different BoringSSL version
+    
+    **Solution**: Clean and rebuild with pinned version:
+    
+    ```bash
+    rm -rf thirdparty/boringssl/
+    make build-boringssl
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Build Performance Tips
+
+<Steps>
+  <Step title="Use Ninja">
+    Ninja is much faster than Make for BoringSSL builds. Already configured by default.
+  </Step>
+  
+  <Step title="Enable Go build cache">
+    Ensure build cache is enabled (default):
+    ```bash
+    go env -w GOCACHE=$(go env GOPATH)/pkg/build
+    ```
+  </Step>
+  
+  <Step title="Use fast linker">
+    Use the gold linker or lld:
+    ```bash
+    CGO_LDFLAGS="-fuse-ld=gold" make build
+    ```
+  </Step>
+  
+  <Step title="Incremental builds">
+    BoringSSL and Go packages are only rebuilt when needed. Leverage this by not running `make clean` unnecessarily.
+  </Step>
+</Steps>
+
+## CI/CD Integration
+
+Example GitHub Actions workflow:
+
+```yaml .github/workflows/build.yml
+name: Build
+
+on: [push, pull_request]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+      
+      - name: Build
+        run: make build
+      
+      - name: Test
+        run: make test
+      
+      - name: Lint
+        run: make lint
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Testing" icon="flask" href="/setup/testing">
+    Learn about testing strategies and frameworks
+  </Card>
+  
+  <Card title="Development Setup" icon="code" href="/setup/development">
+    Set up your development environment
+  </Card>
+  
+  <Card title="Contributing" icon="code-pull-request" href="/guides/contributing">
+    Guidelines for contributing code
+  </Card>
+  
+  <Card title="Performance" icon="gauge" href="/guides/performance">
+    Optimize performance for production
+  </Card>
+</CardGroup>

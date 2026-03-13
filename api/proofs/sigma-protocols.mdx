@@ -1,0 +1,267 @@
+---
+title: 'Sigma Protocols'
+description: 'Generic interface for Sigma protocols and interactive proof systems'
+---
+
+## Overview
+
+The `sigma` package provides a generic framework for implementing Sigma protocols - three-round interactive proof systems that are the foundation of many zero-knowledge proofs. Sigma protocols follow the commitment-challenge-response pattern and can be compiled into non-interactive proofs using techniques like Fiat-Shamir.
+
+## Core Types
+
+### Protocol Interface
+
+The main protocol interface defines the structure of a Sigma protocol:
+
+```go pkg/proofs/sigma/sigma.go
+type Protocol[X Statement, W Witness, A Commitment, S State, Z Response] interface {
+    Name() Name
+    ComputeProverCommitment(statement X, witness W) (A, S, error)
+    ComputeProverResponse(statement X, witness W, commitment A, state S, challenge ChallengeBytes) (Z, error)
+    Verify(statement X, commitment A, challenge ChallengeBytes, response Z) error
+    RunSimulator(statement X, challenge ChallengeBytes) (A, Z, error)
+    SpecialSoundness() uint
+    SoundnessError() uint
+    GetChallengeBytesLength() int
+    ValidateStatement(statement X, witness W) error
+}
+```
+
+<ParamField path="X" type="Statement">
+  The public statement type representing what is being proven
+</ParamField>
+
+<ParamField path="W" type="Witness">
+  The private witness type containing secret information
+</ParamField>
+
+<ParamField path="A" type="Commitment">
+  The prover's first message (commitment)
+</ParamField>
+
+<ParamField path="S" type="State">
+  The prover's internal state between rounds
+</ParamField>
+
+<ParamField path="Z" type="Response">
+  The prover's final message (response)
+</ParamField>
+
+### Type Aliases
+
+```go pkg/proofs/sigma/sigma.go
+type (
+    // Name identifies a sigma protocol
+    Name string
+    
+    // Statement is the public statement type
+    Statement base.BytesLike
+    
+    // Witness is the witness type
+    Witness base.BytesLike
+    
+    // Commitment is the commitment type
+    Commitment base.BytesLike
+    
+    // State is the prover's internal state type
+    State any
+    
+    // Response is the response type
+    Response base.BytesLike
+    
+    // ChallengeBytes is the binary encoding of the challenge space
+    ChallengeBytes []byte
+)
+```
+
+## Interactive Prover
+
+The `Prover` implements the three-round interactive protocol from the prover's perspective.
+
+### Constructor
+
+```go pkg/proofs/sigma/prover.go
+func NewProver[X Statement, W Witness, A Commitment, S State, Z Response](
+    sessionID network.SID,
+    transcript transcripts.Transcript,
+    sigmaProtocol Protocol[X, W, A, S, Z],
+    statement X,
+    witness W,
+) (*Prover[X, W, A, S, Z], error)
+```
+
+<ParamField path="sessionID" type="network.SID">
+  Unique session identifier for protocol execution
+</ParamField>
+
+<ParamField path="transcript" type="transcripts.Transcript">
+  Transcript for recording protocol messages
+</ParamField>
+
+<ParamField path="sigmaProtocol" type="Protocol[X, W, A, S, Z]">
+  The underlying Sigma protocol implementation
+</ParamField>
+
+<ParamField path="statement" type="X">
+  The public statement to prove
+</ParamField>
+
+<ParamField path="witness" type="W">
+  The secret witness
+</ParamField>
+
+### Methods
+
+#### Round1
+
+Generates the prover's commitment (first round).
+
+```go pkg/proofs/sigma/prover.go
+func (p *Prover[X, W, A, S, Z]) Round1() (A, error)
+```
+
+<ResponseField name="commitment" type="A">
+  The prover's commitment message
+</ResponseField>
+
+#### Round3
+
+Generates the prover's response after receiving the verifier's challenge (third round).
+
+```go pkg/proofs/sigma/prover.go
+func (p *Prover[X, W, A, S, Z]) Round3(challengeBytes []byte) (Z, error)
+```
+
+<ParamField path="challengeBytes" type="[]byte">
+  The challenge received from the verifier
+</ParamField>
+
+<ResponseField name="response" type="Z">
+  The prover's response message
+</ResponseField>
+
+## Interactive Verifier
+
+The `Verifier` implements the three-round interactive protocol from the verifier's perspective.
+
+### Constructor
+
+```go pkg/proofs/sigma/verifier.go
+func NewVerifier[X Statement, W Witness, A Commitment, S State, Z Response](
+    sessionID network.SID,
+    transcript transcripts.Transcript,
+    sigmaProtocol Protocol[X, W, A, S, Z],
+    statement X,
+    prng io.Reader,
+) (*Verifier[X, W, A, S, Z], error)
+```
+
+<ParamField path="prng" type="io.Reader">
+  Cryptographically secure random number generator for challenge sampling
+</ParamField>
+
+### Methods
+
+#### Round2
+
+Samples a random challenge after receiving the prover's commitment (second round).
+
+```go pkg/proofs/sigma/verifier.go
+func (v *Verifier[X, W, A, S, Z]) Round2(commitment A) ([]byte, error)
+```
+
+<ParamField path="commitment" type="A">
+  The commitment received from the prover
+</ParamField>
+
+<ResponseField name="challenge" type="[]byte">
+  The randomly sampled challenge bytes
+</ResponseField>
+
+#### Verify
+
+Verifies the prover's response (fourth round).
+
+```go pkg/proofs/sigma/verifier.go
+func (v *Verifier[X, W, A, S, Z]) Verify(response Z) error
+```
+
+<ParamField path="response" type="Z">
+  The response received from the prover
+</ParamField>
+
+Returns `nil` if verification succeeds, or an error if verification fails.
+
+## Usage Example
+
+Here's a complete example using the Schnorr protocol over the k256 curve:
+
+```go
+import (
+    "io"
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+    "github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+    "github.com/bronlabs/bron-crypto/pkg/network"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/dlog/schnorr"
+    "github.com/bronlabs/bron-crypto/pkg/proofs/sigma"
+    "github.com/bronlabs/bron-crypto/pkg/transcripts/hagrid"
+)
+
+func example() error {
+    prng := pcg.NewRandomised()
+    curve := k256.NewCurve()
+    
+    // Generate session ID
+    var sessionID network.SID
+    io.ReadFull(prng, sessionID[:])
+    
+    // Create witness and statement
+    witnessValue, _ := curve.ScalarField().Random(prng)
+    statementValue := curve.ScalarBaseMul(witnessValue)
+    
+    witness := schnorr.NewWitness(witnessValue)
+    statement := schnorr.NewStatement(statementValue)
+    
+    // Create protocol
+    protocol, _ := schnorr.NewProtocol(curve.Generator(), prng)
+    
+    // Prover side
+    proverTranscript := hagrid.NewTranscript("example")
+    prover, _ := sigma.NewProver(sessionID, proverTranscript, protocol, statement, witness)
+    
+    // Round 1: Prover creates commitment
+    commitment, _ := prover.Round1()
+    
+    // Verifier side
+    verifierTranscript := hagrid.NewTranscript("example")
+    verifier, _ := sigma.NewVerifier(sessionID, verifierTranscript, protocol, statement, prng)
+    
+    // Round 2: Verifier samples challenge
+    challenge, _ := verifier.Round2(commitment)
+    
+    // Round 3: Prover responds
+    response, _ := prover.Round3(challenge)
+    
+    // Round 4: Verifier checks
+    return verifier.Verify(response)
+}
+```
+
+## Security Properties
+
+### Special Soundness
+
+The `SpecialSoundness()` method returns n for which the protocol has n-special soundness. This means n distinct valid transcripts with the same commitment but different challenges can be used to extract the witness.
+
+### Soundness Error
+
+The `SoundnessError()` method returns the statistical soundness parameter s, where the probability that a cheating prover succeeds is ≤ 2^(-s). For interactive proofs, this must be at least 40 bits; for non-interactive proofs, at least 128 bits.
+
+### Honest-Verifier Zero-Knowledge
+
+The `RunSimulator()` method produces transcripts that are statistically indistinguishable from real executions without knowing the witness. This demonstrates the zero-knowledge property.
+
+## Related Documentation
+
+- [Compilers](/api/proofs/compilers) - Convert interactive Sigma protocols to non-interactive proofs
+- [Composition](/api/proofs/composition) - Compose multiple Sigma protocols with AND/OR logic

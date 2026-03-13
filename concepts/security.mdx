@@ -1,0 +1,380 @@
+---
+title: 'Security Model'
+description: 'Understanding the security guarantees, boundaries, and best practices of the Bron Crypto library'
+icon: 'shield-halved'
+---
+
+## Security Philosophy
+
+The Bron Crypto library is built by **cryptographers for cryptographers**, with a clear security model that balances practical performance with rigorous cryptographic guarantees.
+
+<Warning>
+**Important**: This library is intended for use by experienced cryptographers and developers who understand the security implications of the protocols involved. If you are not familiar with the underlying cryptographic primitives, please consult with a cryptography expert before using this library in production.
+</Warning>
+
+## Security Boundaries
+
+### Side-Channel Resistance
+
+The library employs a **layered approach** to side-channel resistance:
+
+<CardGroup cols={2}>
+  <Card title="Side-Channel Resistant Foundation" icon="shield-check">
+    **Protected Components**:
+    - Elliptic curve operations (fiat-cryptography)
+    - Big integer arithmetic (saferith, BoringSSL)
+    - Prime field operations
+    - Scalar multiplication
+    
+    These primitives use constant-time implementations to resist timing attacks.
+  </Card>
+  <Card title="Higher-Level Protocols" icon="layer-group">
+    **Not Fully Protected**:
+    - MPC protocol logic
+    - Zero-knowledge proof generation
+    - Commitment scheme operations
+    - Network communication patterns
+    
+    Built on the resistant foundation but may leak information through timing.
+  </Card>
+</CardGroup>
+
+<Info>
+The library is **not designed to be fully side-channel resistant** at all layers. We build higher-level protocols on top of a side-channel resistant foundation.
+</Info>
+
+### Side-Channel Resistant Primitives
+
+#### Elliptic Curves
+
+**Location**: `pkg/base/curves/`
+
+Curve implementations use **fiat-cryptography** generated code:
+
+- Formally verified for correctness
+- Constant-time operations
+- Resistant to timing attacks
+
+Supported curves:
+- **K256** (`pkg/base/curves/k256/impl/`) - secp256k1
+- **P256** - NIST P-256  
+- **Curve25519** - X25519
+- **Edwards25519** - Ed25519
+
+#### Big Integer Operations
+
+**Location**: `pkg/base/nt/numct/`
+
+Wraps two libraries for constant-time arithmetic:
+
+1. **[saferith](https://github.com/cronokirby/saferith)** - Pure Go constant-time big integers
+2. **[BoringSSL](https://boringssl.googlesource.com/boringssl/)** - Google's fork of OpenSSL (via CGO in `pkg/base/cgo/boring/`)
+
+```go
+// Example: Constant-time modular operations
+import "github.com/bronlabs/bron-crypto/pkg/base/nt/numct"
+
+// Operations resist timing attacks
+result := numct.ModMul(a, b, modulus)
+```
+
+### Security Parameters
+
+**Location**: `pkg/base/constants.go`
+
+The library defines standard security levels:
+
+- **Statistical Security**: 80 bits - For interactive proofs
+- **Computational Security**: 128 bits - For non-interactive proofs and encryption
+
+<Accordion title="Why Different Security Levels?">
+Interactive proofs can use lower security parameters because:
+- The verifier's challenge provides entropy
+- An attacker must succeed in real-time interaction
+
+Non-interactive proofs need higher security because:
+- The challenge is derived deterministically (Fiat-Shamir)
+- An attacker can try unlimited offline attempts
+</Accordion>
+
+## Threat Model
+
+### In Scope
+
+The library provides security against:
+
+<CardGroup cols={2}>
+  <Card title="Cryptographic Attacks" icon="code">
+    - Forging signatures without private keys
+    - Breaking commitment schemes
+    - Defeating zero-knowledge proofs
+    - Distinguishing Paillier ciphertexts
+  </Card>
+  <Card title="Protocol-Level Attacks" icon="network-wired">
+    - Malicious participants in threshold protocols
+    - Invalid shares in secret sharing
+    - Replay attacks (via session IDs)
+    - Man-in-the-middle (via authenticated channels)
+  </Card>
+</CardGroup>
+
+### Out of Scope
+
+The library does **not** protect against:
+
+<Warning>
+**Remote timing attacks**: While primitives are constant-time, network timing may leak information.
+
+**Physical attacks**: No protection against hardware attacks, power analysis, or physical access.
+
+**Denial of Service**: Protocol-level DoS attacks are not prevented.
+
+**Social engineering**: Human factors are outside the library's scope.
+</Warning>
+
+### Experimental Features
+
+<Info>
+**Important**: Everything that is **not** a direct or indirect dependency of threshold signature schemes is considered **experimental** and is **not covered by the security audit**.
+</Info>
+
+The audited components include:
+- Threshold signature packages (`pkg/mpc/tsig/`)
+- All direct dependencies (curves, commitments, proofs, etc.)
+- All indirect dependencies (base primitives, number theory, etc.)
+
+See [SECURITY.md](https://github.com/bronlabs/bron-crypto/blob/main/SECURITY.md) for the full scope.
+
+## Security Audit
+
+### Trail of Bits Audit
+
+The threshold signing packages and their dependencies have been audited by **Trail of Bits**.
+
+<Card title="Audit Report" icon="file-contract">
+  **Auditor**: [Trail of Bits](https://github.com/trailofbits/publications?tab=readme-ov-file#cryptography-reviews)
+  
+  **Scope**: 
+  - Threshold Schnorr (Lindell22)
+  - Threshold ECDSA (DKLs23, Lindell17)
+  - Threshold BLS (Boldyreva02)
+  - All cryptographic primitives used by the above
+  
+  **Location**: [audits/](https://github.com/bronlabs/bron-crypto/tree/main/audits) directory
+</Card>
+
+### Continuous Security
+
+<CardGroup cols={2}>
+  <Card title="Bug Bounty Program" icon="bug">
+    Active bug bounty program at [bugbounty.bron.org](https://bugbounty.bron.org/)
+    
+    Rewards based on CVSS v4.0 severity
+  </Card>
+  <Card title="Responsible Disclosure" icon="lock">
+    90-day disclosure timeline for vulnerabilities
+    
+    Report via [GitHub Security Advisories](https://github.com/bronlabs/bron-crypto/security/advisories/new)
+  </Card>
+</CardGroup>
+
+## Cryptographic Assumptions
+
+The security of protocols relies on standard cryptographic assumptions:
+
+### Discrete Logarithm Problem (DLP)
+
+**Used by**: Schnorr signatures, ECDSA, BLS, Pedersen commitments
+
+**Assumption**: Given `g^x` for random `x`, computing `x` is computationally infeasible.
+
+**Security**: Depends on the group order and curve choice
+- 256-bit curves provide ~128-bit security
+- Vulnerable to quantum computers (Shor's algorithm)
+
+### Decisional Composite Residuosity Assumption (DCRA)
+
+**Used by**: Paillier encryption
+
+**Assumption**: For RSA modulus `n = p·q`, distinguishing `n`-th residues in `(Z/n²Z)*` is hard.
+
+**Security**: Depends on RSA modulus size
+- 2048-bit modulus minimum (enforced)
+- 4096-bit recommended for production
+- Also vulnerable to quantum computers
+
+### Random Oracle Model
+
+Many protocols use the **Fiat-Shamir transformation** which requires:
+
+**Assumption**: Hash functions behave like random oracles
+
+**Implementation**: Uses domain-separated hashing
+- BIP340 for Schnorr
+- KMAC for general purposes
+- Poseidon for ZK-friendly applications
+
+<Accordion title="Domain Separation Example">
+From `pkg/proofs/sigma/sigma.go:10`:
+
+```go
+const (
+    transcriptLabel = "BRON_CRYPTO_SIGMA_POK-"
+    statementLabel  = "statementLabel-"
+    commitmentLabel = "commitmentLabel-"
+    challengeLabel  = "challengeLabel-"
+    responseLabel   = "responseLabel-"
+)
+```
+
+Domain separation prevents cross-protocol attacks.
+</Accordion>
+
+## Best Practices
+
+### Key Management
+
+<Warning>
+**Never** store private keys in plain text.
+
+**Never** log or print private key material.
+
+**Never** reuse nonces in encryption or signatures.
+</Warning>
+
+```go
+// Good: Use secure random number generation
+import "crypto/rand"
+
+sk, pk, err := kg.Generate(rand.Reader)
+
+// Bad: Never use a deterministic or weak PRNG for keys
+// sk, pk, err := kg.Generate(math_rand.Reader) // WRONG!
+```
+
+### Randomness
+
+**Always use `crypto/rand.Reader`** for cryptographic operations:
+
+```go
+import "crypto/rand"
+
+// Correct
+ct, nonce, _ := enc.Encrypt(pt, pk, rand.Reader)
+
+// Signing
+sig, _ := signer.Sign(message, rand.Reader)
+
+// Share dealing  
+shares, _ := scheme.Deal(secret, rand.Reader)
+```
+
+### Version Pinning
+
+<Info>
+Security updates are applied **only to the most recent release**. Always use the latest version of `bron-crypto`.
+</Info>
+
+```bash
+# Check for updates regularly
+go get -u github.com/bronlabs/bron-crypto
+
+# Pin to specific version in production
+go get github.com/bronlabs/bron-crypto@v0.x.y
+```
+
+### Session Identifiers
+
+Use unique session IDs for each protocol execution to prevent replay attacks:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/network"
+
+// Generate unique session ID
+sessionID := network.NewSID()
+
+// Use in protocol participant
+participant := protocol.NewParticipant(sessionID, ...)
+```
+
+### Verification Material
+
+Always verify shares in Verifiable Secret Sharing:
+
+```go
+// Good: Verify shares
+secret, err := vss.ReconstructAndVerify(verificationVector, shares...)
+
+// Risky: Skip verification (only if you trust the dealer)
+secret, err := vss.Reconstruct(shares...)
+```
+
+### Re-randomization
+
+Re-randomize ciphertexts when unlinkability is required:
+
+```go
+// If you need to hide that two ciphertexts encrypt the same value
+ct1, _, _ := enc.Encrypt(pt, pk, rand.Reader)
+
+// Later, when sending ct1 again:
+ct2, _, _ := ct1.ReRandomise(pk, rand.Reader)
+// ct2 decrypts to the same value but is unlinkable to ct1
+```
+
+<Warning>
+The Paillier `Shift` operation does **not** re-randomize. If you need unlinkability after shifting, call `ReRandomise` explicitly.
+</Warning>
+
+## Security Checklist
+
+Before deploying to production:
+
+- [ ] Use the latest version of `bron-crypto`
+- [ ] Use `crypto/rand.Reader` for all randomness
+- [ ] Use 2048+ bit primes for Paillier (4096-bit modulus)
+- [ ] Use 256-bit curves for ECC (K256, P256, Edwards25519)
+- [ ] Generate unique session IDs for each protocol execution
+- [ ] Verify shares in VSS protocols
+- [ ] Implement secure key storage (HSM, secure enclave, etc.)
+- [ ] Use authenticated channels for network communication
+- [ ] Implement proper error handling (don't ignore errors)
+- [ ] Conduct security audit for production deployments
+- [ ] Set up monitoring and alerting for anomalous behavior
+- [ ] Have an incident response plan
+
+## Reporting Vulnerabilities
+
+### Preferred Method: GitHub Security Advisories
+
+[Report a Security Vulnerability](https://github.com/bronlabs/bron-crypto/security/advisories/new)
+
+### Alternative Method: Email
+
+[bugbounty@bron.org](mailto:bugbounty@bron.org)
+
+Use the [Vulnerability Report Template](https://bugbounty.bron.org/report).
+
+### Timeline
+
+1. **Acknowledgment**: Within 3 business days
+2. **Initial Triage**: Within 10 business days  
+3. **Collaboration**: Create private fork to develop fix
+4. **Disclosure**: After patch is ready (90-day timeline)
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Design Principles" icon="lightbulb" href="/concepts/design-principles">
+    Understanding redundancy and protocol diversity
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    How security boundaries map to package structure
+  </Card>
+  <Card title="Threshold Cryptography" icon="users" href="/concepts/threshold-cryptography">
+    Security properties of threshold protocols
+  </Card>
+  <Card title="Bug Bounty Program" icon="award" href="https://bugbounty.bron.org/">
+    Report vulnerabilities and earn rewards
+  </Card>
+</CardGroup>

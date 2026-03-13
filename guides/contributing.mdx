@@ -1,0 +1,650 @@
+---
+title: 'Contributing Guidelines'
+description: 'How to contribute to Bron Crypto'
+---
+
+## Getting Started
+
+Thank you for your interest in contributing to Bron Crypto! This project is built by cryptographers for cryptographers, using modern software engineering practices.
+
+<Note>
+**Before You Start:**
+
+By submitting a contribution, you agree that it will be licensed under the Apache 2.0 License (see [LICENSE](https://github.com/bronlabs/bron-crypto/blob/main/LICENSE)).
+
+For security issues, do not open public issues - see [SECURITY.md](/guides/security-best-practices) instead.
+</Note>
+
+## Development Environment Setup
+
+### Prerequisites
+
+You'll need the following tools installed:
+
+- **Go 1.25+** (see `go.mod` for exact minimum version)
+- **C/C++ toolchain** (GCC or Clang)
+- **CMake** and **Ninja** (for building BoringSSL)
+- **Git** (for vendoring BoringSSL)
+- **Docker** (optional - for code generation and isolated builds)
+
+<Steps>
+
+<Step title="Clone the Repository">
+
+```bash
+git clone https://github.com/bronlabs/bron-crypto.git
+cd bron-crypto
+```
+
+</Step>
+
+<Step title="Build BoringSSL">
+
+The library requires BoringSSL for CGO builds:
+
+```bash
+make build-boringssl
+```
+
+This will:
+- Clone BoringSSL at the pinned tag into `thirdparty/boringssl/`
+- Build `libcrypto.a` with CMake + Ninja
+- Output to `thirdparty/boringssl/build/`
+
+</Step>
+
+<Step title="Build the Library">
+
+```bash
+make build
+```
+
+This compiles all Go packages with the correct CGO flags.
+
+</Step>
+
+<Step title="Run Tests">
+
+Verify your setup:
+
+```bash
+make test
+```
+
+Optional but encouraged:
+
+```bash
+make bench      # Run benchmarks
+make coverage   # Generate coverage report
+```
+
+</Step>
+
+</Steps>
+
+<Accordion title="IDE Configuration">
+
+If you want to run tests or benchmarks from your IDE, set the correct CGO flags:
+
+**VSCode (`.vscode/settings.json`):**
+
+```json
+{
+  "go.testEnvVars": {
+    "CGO_CFLAGS": "-I${workspaceFolder}/thirdparty/boringssl/include",
+    "CGO_LDFLAGS": "-L${workspaceFolder}/thirdparty/boringssl/build -lcrypto"
+  }
+}
+```
+
+**GoLand:**
+
+Set environment variables in Run Configurations:
+```
+CGO_CFLAGS=-I/path/to/bron-crypto/thirdparty/boringssl/include
+CGO_LDFLAGS=-L/path/to/bron-crypto/thirdparty/boringssl/build -lcrypto
+```
+
+</Accordion>
+
+### Docker Workflow (Optional)
+
+For a clean, reproducible environment:
+
+```bash
+./run-in-docker.sh make build
+./run-in-docker.sh make test
+./run-in-docker.sh make bench
+```
+
+This uses the provided `build.Dockerfile` to create an isolated container. The BoringSSL build is kept separate from your host build.
+
+## Development Workflow
+
+<Steps>
+
+<Step title="Create a Branch">
+
+```bash
+git checkout -b feature/my-feature
+# or
+git checkout -b fix/issue-123
+```
+
+Use descriptive branch names:
+- `feature/` for new features
+- `fix/` for bug fixes
+- `refactor/` for code refactoring
+- `docs/` for documentation changes
+
+</Step>
+
+<Step title="Make Focused Changes">
+
+Keep commits focused and incremental:
+
+```bash
+# Make changes
+vim pkg/mypackage/myfile.go
+
+# Test your changes
+make test
+
+# Commit
+git add pkg/mypackage/myfile.go
+git commit -m "Add optimization to scalar multiplication"
+```
+
+<Tip>
+**Good commit messages:**
+- Start with a verb (Add, Fix, Update, Remove)
+- Be specific and concise
+- Reference issues when applicable
+
+Example:
+```
+Fix memory leak in threshold signing
+
+The cosigner was not properly releasing nonce memory after
+signing. This adds explicit cleanup in the finalize step.
+
+Fixes #123
+```
+</Tip>
+
+</Step>
+
+<Step title="Add or Update Tests">
+
+All new features and bug fixes should include tests:
+
+```go
+package mypackage_test
+
+import (
+    "testing"
+    "github.com/stretchr/testify/require"
+)
+
+func TestNewFeature(t *testing.T) {
+    t.Parallel()
+    
+    // Test implementation
+    result := MyNewFunction(input)
+    require.NoError(t, err)
+    require.Equal(t, expected, result)
+}
+```
+
+See [TESTING.md](https://github.com/bronlabs/bron-crypto/blob/main/TESTING.md) for testing guidelines.
+
+</Step>
+
+<Step title="Run Quality Checks">
+
+Before submitting, run:
+
+```bash
+make test       # Unit tests
+make lint       # Code linting
+make test-race  # Race condition detection (if modifying concurrency)
+```
+
+Optional:
+```bash
+make bench      # Performance benchmarks
+make coverage   # Code coverage
+```
+
+</Step>
+
+</Steps>
+
+## Code Style
+
+### General Principles
+
+<Warning>
+**Core Philosophy:**
+
+Prefer **explicit, readable code** over cleverness. This library deals with cryptographic protocols where correctness is paramount.
+</Warning>
+
+- **Explicit over implicit** - Make intentions clear
+- **Simple over complex** - Favor straightforward implementations
+- **Documented over undocumented** - Keep exported APIs well-documented
+- **Tested over untested** - Include comprehensive tests
+
+### Go Style Guide
+
+Follow standard Go conventions:
+
+```go
+// GOOD: Clear, documented, explicit
+
+// ThresholdSign performs threshold signing with the given quorum.
+// It returns the aggregated signature or an error if any party misbehaves.
+func ThresholdSign(
+    cosigners []*Cosigner,
+    message []byte,
+    quorum Quorum,
+) (*Signature, error) {
+    // Validate inputs
+    if len(cosigners) < int(quorum.Threshold()) {
+        return nil, errs.New("insufficient cosigners")
+    }
+    
+    // Execute protocol
+    partialSigs, err := collectPartialSignatures(cosigners, message)
+    if err != nil {
+        return nil, err
+    }
+    
+    return aggregateSignatures(partialSigs)
+}
+```
+
+```go
+// BAD: Unclear, undocumented, implicit behavior
+
+func Sign(c []*C, m []byte, q Q) (*S, error) {
+    if len(c) < int(q.T()) { return nil, e }
+    p, e := c1(c, m); if e != nil { return nil, e }
+    return c2(p)
+}
+```
+
+### Naming Conventions
+
+- **Packages:** Short, lowercase, no underscores (e.g., `schnorr`, `network`, `commitments`)
+- **Types:** PascalCase (e.g., `Participant`, `RoundMessage`)
+- **Functions:** PascalCase for exported, camelCase for private
+- **Variables:** Descriptive names, avoid single letters except in loops
+- **Constants:** PascalCase or UPPER_SNAKE_CASE for package-level
+
+### Documentation
+
+All exported APIs must be documented:
+
+```go
+// Participant represents a party in the echo broadcast protocol.
+// It maintains state across the three rounds of the protocol.
+type Participant[B any] struct {
+    sharingID sharing.ID
+    quorum    Quorum
+    state     broadcastState
+}
+
+// NewParticipant creates a new echo broadcast participant.
+// The participant must be part of the provided quorum, otherwise
+// construction fails with an error.
+func NewParticipant[B any](
+    id sharing.ID,
+    quorum Quorum,
+) (*Participant[B], error) {
+    // ...
+}
+```
+
+### Error Handling
+
+Use the `errs-go` package for structured errors:
+
+```go
+import "github.com/bronlabs/errs-go/errs"
+
+// Good: Wrapped errors with context
+if err := validateInput(data); err != nil {
+    return errs.Wrap(err).WithMessage("input validation failed")
+}
+
+// Good: Tagged errors for identifiable abort
+if !verifyProof(proof, public) {
+    return errs.New("invalid proof").WithTag(
+        base.IdentifiableAbortPartyIDTag,
+        maliciousPartyID,
+    )
+}
+
+// Bad: Generic errors without context
+if err != nil {
+    return err  // Lost context!
+}
+```
+
+## Code Generation
+
+Some packages use `go generate` for code generation:
+
+```bash
+make generate
+```
+
+This regenerates:
+- Security parameter tables (`pkg/base/constants.go`)
+- Finite field arithmetic (via Fiat Crypto)
+- Test vectors (using SageMath in Docker)
+
+<Warning>
+**Docker Requirement:**
+
+Some generators require Docker (e.g., SageMath vector generators). If Docker is not installed, those generators will fail. Only run `make generate` if you've modified files with `//go:generate` directives.
+</Warning>
+
+## Testing Guidelines
+
+### Test Types
+
+**1. Unit Tests**
+
+Test individual functions and components:
+
+```go
+func TestScalarMultiplication(t *testing.T) {
+    t.Parallel()
+    
+    curve := k256.NewCurve()
+    scalar := curve.NewScalar().SetUint64(5)
+    point := curve.Generator()
+    
+    result := point.ScalarMul(scalar)
+    
+    // Verify result is 5*G
+    expected := point.Clone().Double().Double().Add(point)
+    require.True(t, result.Equal(expected))
+}
+```
+
+**2. Property Tests**
+
+Use randomized testing for invariants:
+
+```go
+import "pgregory.net/rapid"
+
+func TestHomomorphicProperty(t *testing.T) {
+    t.Parallel()
+    
+    rapid.Check(t, func(t *rapid.T) {
+        a := rapid.Uint64().Draw(t, "a")
+        b := rapid.Uint64().Draw(t, "b")
+        
+        // Property: Enc(a) * Enc(b) = Enc(a + b)
+        encA := encrypt(a)
+        encB := encrypt(b)
+        
+        product := encA.Mul(encB)
+        expected := encrypt(a + b)
+        
+        require.True(t, product.Equal(expected))
+    })
+}
+```
+
+**3. Benchmarks**
+
+Measure performance:
+
+```go
+func BenchmarkThresholdSign(b *testing.B) {
+    // Setup
+    shards := setupDKG(3, 5)
+    message := []byte("benchmark message")
+    
+    b.ResetTimer()
+    
+    for i := 0; i < b.N; i++ {
+        signature, err := ThresholdSign(shards, message)
+        if err != nil {
+            b.Fatal(err)
+        }
+        _ = signature
+    }
+}
+```
+
+### Test Coverage
+
+Aim for high coverage, especially in cryptographic code:
+
+```bash
+make coverage
+go tool cover -html=coverage.out -o coverage.html
+open coverage.html
+```
+
+Target:
+- **Core cryptographic primitives:** 90%+ coverage
+- **Protocol implementations:** 80%+ coverage  
+- **Utility functions:** 70%+ coverage
+
+## Pull Request Guidelines
+
+### Before Submitting
+
+<Steps>
+
+<Step title="Check Quality">
+
+```bash
+make test
+make lint
+```
+
+All tests must pass and code must lint cleanly.
+
+</Step>
+
+<Step title="Update Documentation">
+
+If you've changed public APIs:
+- Update godoc comments
+- Update relevant README files
+- Consider updating guide documentation
+
+</Step>
+
+<Step title="Add Tests">
+
+New features require:
+- Unit tests for the functionality
+- Integration tests if applicable
+- Benchmarks for performance-critical code
+
+</Step>
+
+<Step title="Run Final Checks">
+
+```bash
+make test-race    # Race condition detection
+make bench        # Ensure no performance regression
+```
+
+</Step>
+
+</Steps>
+
+### Creating the PR
+
+1. **Push your branch:**
+   ```bash
+   git push origin feature/my-feature
+   ```
+
+2. **Open PR on GitHub:**
+   - Use the PR template checklist for guidance
+   - Write a clear description of changes
+   - Link related issues (e.g., "Fixes #123")
+
+3. **PR Title Format:**
+   ```
+   Add threshold Schnorr implementation
+   Fix memory leak in cosigner cleanup
+   Update documentation for network package
+   ```
+
+### PR Template
+
+The repository includes a PR template. Fill it out:
+
+```markdown
+## Description
+Brief description of the changes
+
+## Motivation
+Why are these changes needed?
+
+## Changes
+- [ ] Feature A implemented
+- [ ] Bug B fixed
+- [ ] Tests added
+- [ ] Documentation updated
+
+## Testing
+Describe how you tested the changes
+
+## Checklist
+- [ ] Tests pass locally
+- [ ] Linter passes
+- [ ] Documentation updated
+- [ ] No breaking changes (or documented)
+```
+
+### Review Process
+
+1. **Automated Checks:** CI runs tests, linting, and benchmarks
+2. **Code Review:** Maintainers review the code
+3. **Revisions:** Address feedback and push updates
+4. **Approval:** Once approved, a maintainer will merge
+
+<Note>
+**Response Time:**
+
+Maintainers typically respond to PRs within 3-5 business days. Larger PRs may take longer to review.
+</Note>
+
+## Code Review Standards
+
+### What Reviewers Look For
+
+<Accordion title="Correctness">
+
+- Cryptographic correctness
+- Proper error handling
+- Edge cases handled
+- No undefined behavior
+
+</Accordion>
+
+<Accordion title="Security">
+
+- No information leaks
+- Proper randomness usage
+- Side-channel considerations
+- Input validation
+
+</Accordion>
+
+<Accordion title="Code Quality">
+
+- Follows style guide
+- Well-documented
+- Appropriate abstractions
+- Readable and maintainable
+
+</Accordion>
+
+<Accordion title="Testing">
+
+- Adequate test coverage
+- Tests actually test the feature
+- Property tests where applicable
+- Benchmarks for performance claims
+
+</Accordion>
+
+<Accordion title="Performance">
+
+- No obvious inefficiencies
+- Benchmarks show improvements (if claiming optimization)
+- Memory usage reasonable
+
+</Accordion>
+
+## Community
+
+### Communication Channels
+
+- **GitHub Issues:** Bug reports and feature requests
+- **GitHub Discussions:** Questions and design discussions
+- **Pull Requests:** Code contributions
+
+### Getting Help
+
+<CardGroup cols={2}>
+  <Card title="GitHub Discussions" icon="comments" href="https://github.com/bronlabs/bron-crypto/discussions">
+    Ask questions and discuss ideas
+  </Card>
+  <Card title="Issue Tracker" icon="bug" href="https://github.com/bronlabs/bron-crypto/issues">
+    Report bugs and request features
+  </Card>
+  <Card title="Documentation" icon="book" href="/">
+    Browse the complete documentation
+  </Card>
+  <Card title="Examples" icon="code" href="https://github.com/bronlabs/bron-crypto/tree/main/pkg">
+    Learn from example implementations
+  </Card>
+</CardGroup>
+
+## Recognition
+
+Contributors are recognized in:
+
+- **GitHub Contributors:** Automatically listed
+- **Release Notes:** Significant contributions mentioned
+- **Maintainers List:** Long-term contributors may be invited as maintainers
+
+### Current Maintainers
+
+- [Alireza Rafiei](https://www.linkedin.com/in/alireza-rafiei/)
+- [Mateusz Kramarczyk](https://www.linkedin.com/in/mateusz-kramarczyk-9b211125/)
+
+### Alumni
+
+- [Alberto Ibarrondo Luis](https://www.linkedin.com/in/albertoibarrondo/)
+- [Hoang Ong](https://www.linkedin.com/in/hoangong/)
+- [Paul Germouty](https://www.linkedin.com/in/paul-germouty-01506314a/)
+- [Alexandre Adomnicai](https://www.linkedin.com/in/alexandre-adomnicai/)
+- [Mohammad Sarraf](https://www.linkedin.com/in/mohammad-sarraf/)
+
+## License
+
+All contributions are licensed under the Apache 2.0 License.
+
+**SPDX-License-Identifier:** Apache-2.0
+
+See [LICENSE](https://github.com/bronlabs/bron-crypto/blob/main/LICENSE) for details.
+
+---
+
+**Thank you for contributing to Bron Crypto!**

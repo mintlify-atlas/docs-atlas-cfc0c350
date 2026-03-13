@@ -1,0 +1,130 @@
+---
+title: "Installation"
+description: "Install and set up Bron Crypto library"
+---
+
+## Prerequisites
+
+Before installing Bron Crypto, ensure you have the following prerequisites:
+
+<CardGroup cols={2}>
+  <Card title="Go" icon="golang">
+    Go `1.26` or later (see [go.mod](https://github.com/bronlabs/bron-crypto/blob/main/go.mod))
+  </Card>
+  <Card title="C/C++ Toolchain" icon="code">
+    GCC or Clang compiler for CGO support
+  </Card>
+  <Card title="Build Tools" icon="hammer">
+    `cmake` and `ninja` for building BoringSSL
+  </Card>
+  <Card title="Version Control" icon="git">
+    `git` for vendoring dependencies
+  </Card>
+</CardGroup>
+
+<Warning>
+  This library requires CGO and links against BoringSSL. A C/C++ toolchain is mandatory.
+</Warning>
+
+## Install the Library
+
+Install Bron Crypto using Go's package manager:
+
+```bash
+go get github.com/bronlabs/bron-crypto
+```
+
+This will download the library and add it to your `go.mod` file.
+
+## Build BoringSSL
+
+Bron Crypto depends on a vendored BoringSSL build. After installing the library, build BoringSSL:
+
+<Steps>
+  <Step title="Clone and navigate to the repository">
+    If you're developing with Bron Crypto, clone the repository:
+    
+    ```bash
+    git clone https://github.com/bronlabs/bron-crypto.git
+    cd bron-crypto
+    ```
+  </Step>
+  
+  <Step title="Build BoringSSL">
+    Run the build target to compile BoringSSL:
+    
+    ```bash
+    make build-boringssl
+    ```
+    
+    This will:
+    - Clone BoringSSL at the pinned tag into `thirdparty/boringssl/`
+    - Build `libcrypto.a` with `cmake` + `ninja`
+    - Output to `thirdparty/boringssl/build/`
+  </Step>
+  
+  <Step title="Build the library">
+    Build all Go packages with correct CGO flags:
+    
+    ```bash
+    make build
+    ```
+  </Step>
+</Steps>
+
+## Verify Installation
+
+Verify that everything is working correctly:
+
+```bash
+make test
+```
+
+This will run the test suite and ensure BoringSSL is linked correctly.
+
+## IDE Configuration
+
+<Info>
+  For running tests or benchmarks in your IDE, set the correct CGO flags to link against BoringSSL.
+</Info>
+
+If you want to run tests or benchmarks directly in your IDE, configure these environment variables:
+
+```bash
+CGO_CFLAGS="-I$(pwd)/thirdparty/boringssl/include"
+CGO_LDFLAGS="-L$(pwd)/thirdparty/boringssl/build -lcrypto"
+```
+
+Example for running package-specific tests:
+
+```bash
+CGO_CFLAGS="-I$(pwd)/thirdparty/boringssl/include" \
+CGO_LDFLAGS="-L$(pwd)/thirdparty/boringssl/build -lcrypto" \
+go test ./pkg/mpc/tsig/...
+```
+
+## Docker Setup (Optional)
+
+For a clean, reproducible build environment, use the provided Docker workflow:
+
+```bash
+./run-in-docker.sh make build
+./run-in-docker.sh make test
+```
+
+This builds a container from `build.Dockerfile`, mounts the repo, and runs the build with isolated dependencies.
+
+<Note>
+  The Docker build uses `BUILD_PREFIX=docker-` to keep artifacts separate from host builds.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Quickstart" icon="rocket" href="/quickstart">
+    Build your first threshold signature
+  </Card>
+  <Card title="Development Setup" icon="code" href="/setup/development">
+    Set up your development environment
+  </Card>
+</CardGroup>

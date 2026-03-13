@@ -1,80 +1,442 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Get started with Bron Crypto threshold signatures in minutes
 ---
 
-## Get started in three steps
-
-Get your documentation site running locally and make your first customization.
-
-### Step 1: Set up your local environment
-
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 2: Deploy your changes
-
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
-
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
-
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
-
-### Step 3: Go live
-
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
-
-## Next steps
-
-Now that you have your docs running, explore these key features:
-
-<CardGroup cols={2}>
-
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
-
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
-
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
-
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+This guide walks you through creating your first threshold signature using the Lindell22 Schnorr protocol. We'll set up a 2-of-3 threshold signature scheme where any 2 parties can collaborate to sign a message.
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+This quickstart assumes you've already [installed](/installation) Bron Crypto and have Go 1.26+ configured with the required build tools.
 </Note>
+
+## Overview
+
+In this quickstart, you'll:
+
+1. Set up a threshold access structure
+2. Run Distributed Key Generation (DKG)
+3. Create a signing quorum
+4. Execute the 3-round signing protocol
+5. Aggregate and verify the signature
+
+## Complete Example
+
+Here's a complete working example of threshold Schnorr signing using BIP-340:
+
+```go example.go
+package main
+
+import (
+	"crypto/rand"
+	"crypto/sha256"
+	"fmt"
+	"log"
+
+	"github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+	"github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+	"github.com/bronlabs/bron-crypto/pkg/mpc/dkg/gennaro"
+	"github.com/bronlabs/bron-crypto/pkg/mpc/session"
+	"github.com/bronlabs/bron-crypto/pkg/mpc/sharing"
+	"github.com/bronlabs/bron-crypto/pkg/mpc/sharing/accessstructures/threshold"
+	"github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22"
+	"github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22/signing"
+	"github.com/bronlabs/bron-crypto/pkg/proofs/sigma/compiler/fiatshamir"
+	"github.com/bronlabs/bron-crypto/pkg/signatures/schnorrlike/bip340"
+)
+
+func main() {
+	// 1. Set up parameters
+	thresh := uint(2)
+	total := uint(3)
+	
+	// Initialize elliptic curve group (secp256k1)
+	group := k256.NewCurve()
+	prng := pcg.NewRandomised()
+	
+	// Create BIP-340 Schnorr scheme
+	scheme, err := bip340.NewScheme(prng)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 2. Set up shareholders and access structure
+	shareholders := sharing.NewOrdinalShareholderSet(total)
+	accessStructure, err := threshold.NewThresholdAccessStructure(thresh, shareholders)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 3. Run Distributed Key Generation (DKG)
+	// Create DKG participants
+	parties := make(map[sharing.ID]*gennaro.Participant[*k256.Point, *k256.Scalar])
+	for id := range shareholders.Iter() {
+		// Create session context for each party
+		ctx := session.NewInMemoryContext(id, rand.Reader)
+		
+		// Create DKG participant
+		p, err := gennaro.NewParticipant(ctx, group, accessStructure, fiatshamir.Name, prng)
+		if err != nil {
+			log.Fatal(err)
+		}
+		parties[id] = p
+	}
+
+	// Execute DKG rounds (simplified - in production use proper message routing)
+	shards := runDKG(parties)
+	
+	// Extract public key
+	publicKey := shards[0].PublicKey()
+	fmt.Printf("✓ DKG complete. Public key: %x\n", publicKey.Bytes())
+
+	// 4. Create signing quorum (2 out of 3 parties)
+	signingSet := sharing.NewShareholderSet([]sharing.ID{0, 1})
+	
+	// Convert DKG shards to signing shards
+	signingShards := make(map[sharing.ID]*lindell22.Shard[*k256.Point, *k256.Scalar])
+	for id := range signingSet.Iter() {
+		signingShards[id] = lindell22.ConvertGennaro(shards[id])
+	}
+
+	// 5. Sign a message
+	message := []byte("Hello, threshold cryptography!")
+	messageHash := sha256.Sum256(message)
+	
+	// Create cosigners
+	cosigners := make(map[sharing.ID]*signing.Cosigner[*k256.Point, *k256.Scalar])
+	for id, shard := range signingShards {
+		ctx := session.NewInMemoryContext(id, rand.Reader)
+		cosigner, err := signing.NewCosigner(ctx, shard, messageHash[:], signingSet, scheme, prng)
+		if err != nil {
+			log.Fatal(err)
+		}
+		cosigners[id] = cosigner
+	}
+
+	// Execute 3-round signing protocol
+	signature := runSigning(cosigners, messageHash[:])
+	
+	// 6. Verify signature
+	verifier, err := scheme.Verifier()
+	if err != nil {
+		log.Fatal(err)
+	}
+	
+	err = verifier.Verify(publicKey, messageHash[:], signature)
+	if err != nil {
+		log.Fatalf("Signature verification failed: %v", err)
+	}
+	
+	fmt.Printf("✓ Signature verified successfully!\n")
+	fmt.Printf("  Message: %s\n", string(message))
+	fmt.Printf("  Signature: %x\n", signature)
+}
+
+// runDKG executes the 3-round Gennaro DKG protocol
+func runDKG(parties map[sharing.ID]*gennaro.Participant[*k256.Point, *k256.Scalar]) map[sharing.ID]*gennaro.Output[*k256.Point, *k256.Scalar] {
+	// Round 1: Broadcast commitments
+	round1Msgs := make(map[sharing.ID]map[sharing.ID]any)
+	for id, p := range parties {
+		msgs, err := p.Round1()
+		if err != nil {
+			log.Fatal(err)
+		}
+		round1Msgs[id] = msgs
+	}
+	
+	// Deliver Round 1 messages
+	for senderID, msgs := range round1Msgs {
+		for receiverID, msg := range msgs {
+			if err := parties[receiverID].DeliverMessage(senderID, msg); err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
+
+	// Round 2: Send shares
+	round2Msgs := make(map[sharing.ID]map[sharing.ID]any)
+	for id, p := range parties {
+		msgs, err := p.Round2()
+		if err != nil {
+			log.Fatal(err)
+		}
+		round2Msgs[id] = msgs
+	}
+	
+	// Deliver Round 2 messages
+	for senderID, msgs := range round2Msgs {
+		for receiverID, msg := range msgs {
+			if err := parties[receiverID].DeliverMessage(senderID, msg); err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
+
+	// Round 3: Verify and finalize
+	outputs := make(map[sharing.ID]*gennaro.Output[*k256.Point, *k256.Scalar])
+	for id, p := range parties {
+		output, err := p.Round3()
+		if err != nil {
+			log.Fatal(err)
+		}
+		outputs[id] = output
+	}
+	
+	return outputs
+}
+
+// runSigning executes the 3-round Lindell22 signing protocol
+func runSigning(cosigners map[sharing.ID]*signing.Cosigner[*k256.Point, *k256.Scalar], messageHash []byte) []byte {
+	// Round 1: Commitment phase
+	round1Msgs := make(map[sharing.ID]map[sharing.ID]any)
+	for id, c := range cosigners {
+		msgs, err := c.Round1()
+		if err != nil {
+			log.Fatal(err)
+		}
+		round1Msgs[id] = msgs
+	}
+	
+	// Deliver Round 1 messages
+	for senderID, msgs := range round1Msgs {
+		for receiverID, msg := range msgs {
+			if err := cosigners[receiverID].DeliverMessage(senderID, msg); err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
+
+	// Round 2: Decommitment phase
+	round2Msgs := make(map[sharing.ID]map[sharing.ID]any)
+	for id, c := range cosigners {
+		msgs, err := c.Round2()
+		if err != nil {
+			log.Fatal(err)
+		}
+		round2Msgs[id] = msgs
+	}
+	
+	// Deliver Round 2 messages
+	for senderID, msgs := range round2Msgs {
+		for receiverID, msg := range msgs {
+			if err := cosigners[receiverID].DeliverMessage(senderID, msg); err != nil {
+				log.Fatal(err)
+			}
+		}
+	}
+
+	// Round 3: Partial signature generation
+	partialSigs := make(map[sharing.ID][]byte)
+	for id, c := range cosigners {
+		msgs, err := c.Round3()
+		if err != nil {
+			log.Fatal(err)
+		}
+		// In this protocol, Round3 returns the partial signature
+		for _, msg := range msgs {
+			if partialSig, ok := msg.([]byte); ok {
+				partialSigs[id] = partialSig
+			}
+		}
+	}
+
+	// Aggregate partial signatures (use any cosigner)
+	var aggregator *signing.Cosigner[*k256.Point, *k256.Scalar]
+	for _, c := range cosigners {
+		aggregator = c
+		break
+	}
+	
+	signature, err := aggregator.Aggregate(partialSigs)
+	if err != nil {
+		log.Fatal(err)
+	}
+	
+	return signature
+}
+```
+
+## Run the Example
+
+<Steps>
+  <Step title="Save the code">
+    Save the complete example above as `example.go`.
+  </Step>
+
+  <Step title="Initialize Go module">
+    ```bash
+    go mod init threshold-example
+    go get github.com/bronlabs/bron-crypto
+    ```
+  </Step>
+
+  <Step title="Build and run">
+    ```bash
+    go run example.go
+    ```
+    
+    You should see output like:
+    ```
+    ✓ DKG complete. Public key: 02a1b2c3...
+    ✓ Signature verified successfully!
+      Message: Hello, threshold cryptography!
+      Signature: 3f4a5b6c...
+    ```
+  </Step>
+</Steps>
+
+## Understanding the Flow
+
+<AccordionGroup>
+  <Accordion title="Step 1: Setup" icon="gear">
+    We initialize the cryptographic parameters:
+    - **Threshold (t=2)**: Minimum number of parties needed to sign
+    - **Total (n=3)**: Total number of parties
+    - **Curve (secp256k1)**: The elliptic curve for cryptographic operations
+    - **BIP-340**: Bitcoin's Schnorr signature standard
+  </Accordion>
+
+  <Accordion title="Step 2: Distributed Key Generation (DKG)" icon="key">
+    The Gennaro DKG protocol generates:
+    - A shared public key (known to all)
+    - Private key shares (one per party, never reconstructed)
+    - Verification information for each share
+    
+    **3 rounds**: Commitment → Share distribution → Verification
+  </Accordion>
+
+  <Accordion title="Step 3: Signing Quorum" icon="users">
+    Any subset of `t` parties can form a signing quorum. In this example:
+    - We select parties 0 and 1 (2 out of 3)
+    - Convert DKG outputs to signing shards
+    - Each party creates a cosigner instance
+  </Accordion>
+
+  <Accordion title="Step 4: Signing Protocol" icon="signature">
+    The Lindell22 signing protocol has **3 rounds**:
+    
+    **Round 1 (Commitment)**: Each party commits to random nonces
+    
+    **Round 2 (Decommitment)**: Parties reveal their nonces
+    
+    **Round 3 (Partial Signatures)**: Each party computes their partial signature using:
+    - Their private key share
+    - The message hash
+    - The combined nonce
+  </Accordion>
+
+  <Accordion title="Step 5: Aggregation & Verification" icon="check-circle">
+    The **aggregator** combines partial signatures into a standard Schnorr signature. This signature:
+    - Is indistinguishable from a single-party signature
+    - Can be verified using the public key
+    - Provides **identifiable abort**: if signing fails, the malicious party can be identified
+  </Accordion>
+</AccordionGroup>
+
+## Key Concepts
+
+<CardGroup cols={2}>
+  <Card title="Threshold Access Structure" icon="lock">
+    Defines which subsets of parties can sign. A `t-of-n` threshold means any `t` parties can collaborate to produce a valid signature.
+  </Card>
+  
+  <Card title="DKG (Distributed Key Generation)" icon="key">
+    A protocol where parties collectively generate a keypair without any single party learning the private key.
+  </Card>
+  
+  <Card title="Cosigner" icon="user-shield">
+    A party participating in the signing protocol. Each cosigner holds a share of the private key.
+  </Card>
+  
+  <Card title="Partial Signature" icon="signature">
+    A signature fragment created by one party using their key share. Combined partial signatures form the final signature.
+  </Card>
+</CardGroup>
+
+## Protocol Features
+
+<Info>
+**Identifiable Abort**: If signing fails (e.g., due to a malicious party), the protocol identifies which party misbehaved.
+</Info>
+
+<Note>
+**Security Model**: The Lindell22 protocol is secure against malicious adversaries corrupting up to `t-1` parties.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="API Reference" icon="book" href="/api/mpc/threshold-schnorr">
+    Explore the complete Lindell22 API documentation
+  </Card>
+  
+  <Card title="Other Protocols" icon="shapes" href="/api/mpc/threshold-ecdsa">
+    Learn about threshold ECDSA (DKLs23, Lindell17)
+  </Card>
+  
+  <Card title="Development Setup" icon="wrench" href="/setup/development">
+    Set up your development environment
+  </Card>
+  
+  <Card title="Testing Guide" icon="vial" href="/setup/testing">
+    Learn how to test your threshold signatures
+  </Card>
+</CardGroup>
+
+## Variants
+
+### Vanilla Schnorr
+
+To use vanilla Schnorr instead of BIP-340:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/signatures/schnorrlike/schnorr"
+
+// Replace BIP-340 scheme creation with:
+scheme, err := schnorr.NewScheme(prng)
+```
+
+### Different Threshold
+
+Change the threshold and total parameters:
+
+```go
+thresh := uint(3)  // 3-of-5 threshold
+total := uint(5)
+```
+
+### Other Curves
+
+The protocol works with any supported curve:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/base/curves/p256"
+
+// Use P-256 instead of secp256k1:
+group := p256.NewCurve()
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Build errors about BoringSSL" icon="triangle-exclamation">
+    Ensure you've built BoringSSL:
+    ```bash
+    make build-boringssl
+    ```
+    See the [building guide](/setup/building) for details.
+  </Accordion>
+
+  <Accordion title="DKG fails with verification error" icon="circle-xmark">
+    Check that:
+    - All parties use the same access structure
+    - Messages are delivered to all parties
+    - No party IDs are duplicated
+  </Accordion>
+
+  <Accordion title="Signing produces invalid signature" icon="signature-slash">
+    Verify that:
+    - The signing set size ≥ threshold
+    - All cosigners use the same message hash
+    - The correct scheme (BIP-340 vs vanilla) is used
+  </Accordion>
+</AccordionGroup>

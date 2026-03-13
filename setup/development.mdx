@@ -1,0 +1,346 @@
+---
+title: "Development Setup"
+description: "Set up your development environment for Bron Crypto"
+---
+
+## Prerequisites
+
+Ensure you have all required tools installed before starting:
+
+<CardGroup cols={2}>
+  <Card title="Go" icon="golang">
+    Version `1.26` or later
+  </Card>
+  <Card title="C/C++ Toolchain" icon="code">
+    GCC or Clang (tested with GCC)
+  </Card>
+  <Card title="Build Tools" icon="hammer">
+    `cmake` and `ninja`
+  </Card>
+  <Card title="Git" icon="git">
+    For vendoring BoringSSL
+  </Card>
+</CardGroup>
+
+<Info>
+  **Optional**: Docker is required if you want to regenerate code, test vectors, or use the isolated build environment.
+</Info>
+
+## Quick Start
+
+Get up and running in two commands:
+
+<Steps>
+  <Step title="Clone the repository">
+    ```bash
+    git clone https://github.com/bronlabs/bron-crypto.git
+    cd bron-crypto
+    ```
+  </Step>
+  
+  <Step title="Build everything">
+    ```bash
+    make build
+    ```
+    
+    This single command:
+    - Clones and builds BoringSSL at the pinned tag
+    - Compiles all Go packages with correct CGO flags
+    - Validates that everything links correctly
+  </Step>
+</Steps>
+
+You're now ready to develop!
+
+## Development Workflow
+
+### Building
+
+Build the entire project:
+
+```bash
+make build
+```
+
+This automatically injects the required CGO flags for BoringSSL.
+
+### Testing
+
+Run the full test suite:
+
+```bash
+make test
+```
+
+Run tests with race detection:
+
+```bash
+make test-race
+```
+
+### Benchmarking
+
+Run performance benchmarks:
+
+```bash
+make bench
+```
+
+### Linting
+
+Lint the codebase:
+
+```bash
+make lint
+```
+
+Auto-fix linting issues:
+
+```bash
+make lint-fix
+```
+
+## BoringSSL Setup
+
+<Info>
+  Bron Crypto links against a vendored BoringSSL build (static `libcrypto.a`). This is required for CGO code.
+</Info>
+
+### Build BoringSSL Manually
+
+If you need to rebuild BoringSSL separately:
+
+```bash
+make build-boringssl
+```
+
+This will:
+
+1. Clone BoringSSL at the pinned tag (`0.20251124.0`) into `thirdparty/boringssl/`
+2. Build `libcrypto.a` using `cmake` + `ninja`
+3. Output artifacts to `thirdparty/boringssl/build/`
+
+### CGO Flags for IDE Integration
+
+To run tests or benchmarks directly in your IDE (VS Code, GoLand, etc.), configure these environment variables:
+
+<CodeGroup>
+```bash Bash/Zsh
+export CGO_CFLAGS="-I$(pwd)/thirdparty/boringssl/include"
+export CGO_LDFLAGS="-L$(pwd)/thirdparty/boringssl/build -lcrypto"
+```
+
+```json VS Code (settings.json)
+{
+  "go.testEnvVars": {
+    "CGO_CFLAGS": "-I${workspaceFolder}/thirdparty/boringssl/include",
+    "CGO_LDFLAGS": "-L${workspaceFolder}/thirdparty/boringssl/build -lcrypto"
+  }
+}
+```
+
+```xml GoLand (Run Configuration)
+<envs>
+  <env name="CGO_CFLAGS" value="-I$PROJECT_DIR$/thirdparty/boringssl/include" />
+  <env name="CGO_LDFLAGS" value="-L$PROJECT_DIR$/thirdparty/boringssl/build -lcrypto" />
+</envs>
+```
+</CodeGroup>
+
+### Running Package-Specific Tests
+
+Run tests for a specific package:
+
+```bash
+CGO_CFLAGS="-I$(pwd)/thirdparty/boringssl/include" \
+CGO_LDFLAGS="-L$(pwd)/thirdparty/boringssl/build -lcrypto" \
+go test ./pkg/mpc/tsig/tschnorr/...
+```
+
+<Warning>
+  If you use a `BUILD_PREFIX` (e.g., `docker-`), update the path: `thirdparty/boringssl/${BUILD_PREFIX}build`
+</Warning>
+
+## Code Generation (Optional)
+
+<Note>
+  You typically don't need to regenerate code unless modifying core primitives or security parameters.
+</Note>
+
+Some packages use `go generate` to create code and test vectors:
+
+```bash
+make generate
+```
+
+### Notable Generators
+
+<AccordionGroup>
+  <Accordion title="Security Parameters" icon="shield">
+    **Location**: `tools/secparams-codegen`
+    
+    Regenerates security parameter tables in `pkg/base/constants.go`.
+  </Accordion>
+  
+  <Accordion title="Field Arithmetic" icon="calculator">
+    **Location**: `tools/field-codegen`
+    
+    Regenerates finite field arithmetic using [Fiat Crypto](https://github.com/mit-plv/fiat-crypto) for various elliptic curves.
+  </Accordion>
+  
+  <Accordion title="Test Vectors" icon="flask">
+    **Location**: `pkg/base/algebra/impl/fields/vectors/*`
+    
+    Runs SageMath in Docker to generate field test vectors.
+    
+    <Warning>
+      Requires Docker. Will fail if Docker is not installed.
+    </Warning>
+  </Accordion>
+</AccordionGroup>
+
+## Docker-Based Workflow
+
+For a clean, reproducible build environment:
+
+```bash
+./run-in-docker.sh make build
+./run-in-docker.sh make test
+./run-in-docker.sh make bench
+./run-in-docker.sh make lint
+```
+
+### How It Works
+
+1. Builds a container from `build.Dockerfile`
+2. Mounts the repository at `/src`
+3. Sets `BUILD_PREFIX=docker-` to separate artifacts from host builds
+4. Runs the specified make target
+
+<Info>
+  Docker builds are completely isolated from host builds. Intermediate artifacts are never shared between environments.
+</Info>
+
+### Benefits
+
+- **Reproducibility**: Same build environment across all platforms
+- **Isolation**: No pollution of host filesystem
+- **CI/CD-ready**: Matches production build environment
+
+## Project Structure
+
+Understanding the repository layout:
+
+```
+bron-crypto/
+├── pkg/                    # All Go packages
+│   ├── mpc/               # Multi-party computation
+│   │   ├── tsig/          # Threshold signatures
+│   │   │   ├── tschnorr/  # Threshold Schnorr (Lindell22)
+│   │   │   ├── tecdsa/    # Threshold ECDSA (DKLs23, Lindell17)
+│   │   │   └── tbls/      # Threshold BLS (Boldyreva02)
+│   │   ├── dkg/           # Distributed key generation
+│   │   └── sharing/       # Secret sharing primitives
+│   ├── proofs/            # Zero-knowledge proofs
+│   │   └── sigma/         # Sigma protocols
+│   ├── encryption/        # Encryption schemes (Paillier, etc.)
+│   ├── commitments/       # Commitment schemes
+│   ├── signatures/        # Signature schemes
+│   ├── hashing/           # Hash functions
+│   └── base/              # Base cryptographic primitives
+│       ├── curves/        # Elliptic curves (K256, P256, Ed25519)
+│       ├── algebra/       # Algebraic structures
+│       └── nt/            # Number theory (CRT, modular arithmetic)
+├── thirdparty/            # Vendored dependencies
+│   └── boringssl/         # BoringSSL build artifacts
+├── tools/                 # Code generation and tooling
+├── audits/                # Security audit reports
+└── docs/                  # Specification documents
+```
+
+## Output Artifacts
+
+<Warning>
+  Bron Crypto does not produce distributable binaries. It is designed to be used as a library via Go packages.
+</Warning>
+
+The repository is intended to be imported into other projects:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22"
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+)
+```
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="CGO linking errors">
+    **Error**: `undefined reference to 'CRYPTO_...'`
+    
+    **Solution**: Ensure BoringSSL is built and CGO flags are set:
+    
+    ```bash
+    make build-boringssl
+    export CGO_CFLAGS="-I$(pwd)/thirdparty/boringssl/include"
+    export CGO_LDFLAGS="-L$(pwd)/thirdparty/boringssl/build -lcrypto"
+    ```
+  </Accordion>
+  
+  <Accordion title="cmake or ninja not found">
+    **Error**: Command not found during BoringSSL build
+    
+    **Solution**: Install build tools:
+    
+    ```bash
+    # Ubuntu/Debian
+    sudo apt-get install cmake ninja-build
+    
+    # macOS
+    brew install cmake ninja
+    
+    # Fedora/RHEL
+    sudo dnf install cmake ninja-build
+    ```
+  </Accordion>
+  
+  <Accordion title="Go version mismatch">
+    **Error**: `go: go.mod requires go >= 1.26`
+    
+    **Solution**: Upgrade Go:
+    
+    ```bash
+    # Using official installer
+    wget https://go.dev/dl/go1.26.linux-amd64.tar.gz
+    sudo rm -rf /usr/local/go
+    sudo tar -C /usr/local -xzf go1.26.linux-amd64.tar.gz
+    ```
+  </Accordion>
+  
+  <Accordion title="Docker build failures">
+    **Error**: Docker commands fail during code generation
+    
+    **Solution**: Either install Docker or skip code generation (only needed when modifying primitives).
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Building" icon="hammer" href="/setup/building">
+    Deep dive into build options and configurations
+  </Card>
+  
+  <Card title="Testing" icon="flask" href="/setup/testing">
+    Learn about the testing infrastructure
+  </Card>
+  
+  <Card title="Contributing" icon="code-pull-request" href="/guides/contributing">
+    Contribute to Bron Crypto
+  </Card>
+  
+  <Card title="API Reference" icon="book" href="/api/mpc/threshold-schnorr">
+    Explore the API documentation
+  </Card>
+</CardGroup>

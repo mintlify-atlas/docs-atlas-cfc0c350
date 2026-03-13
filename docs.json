@@ -1,122 +1,133 @@
 {
   "$schema": "https://mintlify.com/docs.json",
-  "theme": "mint",
-  "name": "Mint Starter Kit",
+  "name": "Bron Crypto",
+  "theme": "aspen",
   "colors": {
-    "primary": "#16A34A",
-    "light": "#07C983",
-    "dark": "#15803D"
+    "primary": "#0f0b1d",
+    "light": "#bba8ea",
+    "dark": "#7c7c9c"
   },
-  "favicon": "/favicon.svg",
+  "favicon": "https://media.brand.dev/5a62d3ad-6683-4e5b-bc33-a17be669ab3e.jpg",
+  "logo": {
+    "light": "https://media.brand.dev/1db7ff51-cdda-4aba-8230-96df250780a3.png",
+    "dark": "https://media.brand.dev/1db7ff51-cdda-4aba-8230-96df250780a3.png"
+  },
+  "navbar": {
+    "primary": {
+      "type": "github",
+      "href": "https://github.com/bronlabs/bron-crypto"
+    }
+  },
+  "footer": {
+    "socials": {
+      "github": "https://github.com/bronlabs/bron-crypto"
+    }
+  },
   "navigation": {
     "tabs": [
       {
-        "tab": "Guides",
+        "tab": "Get Started",
         "groups": [
           {
-            "group": "Getting started",
+            "group": "Introduction",
             "pages": [
-              "index",
-              "quickstart",
-              "development"
+              "introduction",
+              "installation",
+              "quickstart"
             ]
           },
           {
-            "group": "Customization",
+            "group": "Setup",
             "pages": [
-              "essentials/settings",
-              "essentials/navigation"
-            ]
-          },
-          {
-            "group": "Writing content",
-            "pages": [
-              "essentials/markdown",
-              "essentials/code",
-              "essentials/images",
-              "essentials/reusable-snippets"
-            ]
-          },
-          {
-            "group": "AI tools",
-            "pages": [
-              "ai-tools/cursor",
-              "ai-tools/claude-code",
-              "ai-tools/windsurf"
+              "setup/development",
+              "setup/building",
+              "setup/testing"
             ]
           }
         ]
       },
       {
-        "tab": "API reference",
+        "tab": "Core Concepts",
         "groups": [
           {
-            "group": "API documentation",
+            "group": "Overview",
             "pages": [
-              "api-reference/introduction"
+              "concepts/architecture",
+              "concepts/security",
+              "concepts/design-principles"
             ]
           },
           {
-            "group": "Endpoint examples",
+            "group": "Fundamentals",
             "pages": [
-              "api-reference/endpoint/get",
-              "api-reference/endpoint/create",
-              "api-reference/endpoint/delete",
-              "api-reference/endpoint/webhook"
+              "concepts/threshold-cryptography",
+              "concepts/mpc",
+              "concepts/zero-knowledge-proofs"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "MPC & Threshold Signatures",
+            "pages": [
+              "api/mpc/threshold-schnorr",
+              "api/mpc/threshold-ecdsa",
+              "api/mpc/threshold-bls",
+              "api/mpc/dkg",
+              "api/mpc/secret-sharing"
+            ]
+          },
+          {
+            "group": "Cryptographic Primitives",
+            "pages": [
+              "api/primitives/encryption",
+              "api/primitives/commitments",
+              "api/primitives/hashing",
+              "api/primitives/signatures"
+            ]
+          },
+          {
+            "group": "Zero-Knowledge Proofs",
+            "pages": [
+              "api/proofs/sigma-protocols",
+              "api/proofs/compilers",
+              "api/proofs/composition"
+            ]
+          },
+          {
+            "group": "Base Libraries",
+            "pages": [
+              "api/base/curves",
+              "api/base/algebra",
+              "api/base/number-theory"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Guides",
+        "groups": [
+          {
+            "group": "Examples",
+            "pages": [
+              "guides/threshold-signing",
+              "guides/custom-protocols",
+              "guides/networking"
+            ]
+          },
+          {
+            "group": "Advanced",
+            "pages": [
+              "guides/security-best-practices",
+              "guides/performance",
+              "guides/contributing"
             ]
           }
         ]
       }
-    ],
-    "global": {
-      "anchors": [
-        {
-          "anchor": "Documentation",
-          "href": "https://mintlify.com/docs",
-          "icon": "book-open-cover"
-        },
-        {
-          "anchor": "Blog",
-          "href": "https://mintlify.com/blog",
-          "icon": "newspaper"
-        }
-      ]
-    }
-  },
-  "logo": {
-    "light": "/logo/light.svg",
-    "dark": "/logo/dark.svg"
-  },
-  "navbar": {
-    "links": [
-      {
-        "label": "Support",
-        "href": "mailto:hi@mintlify.com"
-      }
-    ],
-    "primary": {
-      "type": "button",
-      "label": "Dashboard",
-      "href": "https://dashboard.mintlify.com"
-    }
-  },
-  "contextual": {
-    "options": [
-     "copy",
-     "view",
-     "chatgpt",
-     "claude",
-     "perplexity",
-     "mcp",
-     "cursor",
-     "vscode"
-   ]
-  },
-  "footer": {
-    "socials": {
-      "x": "https://x.com/mintlify",
-      "github": "https://github.com/mintlify",
-      "linkedin": "https://linkedin.com/company/mintlify"
-    }
+    ]
   }
 }

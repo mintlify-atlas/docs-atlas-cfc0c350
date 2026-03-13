@@ -1,0 +1,597 @@
+---
+title: 'Multi-Party Computation'
+description: 'Understanding MPC protocols, secure computation, and the foundations of threshold cryptography'
+icon: 'handshake'
+---
+
+## What is Multi-Party Computation?
+
+**Multi-Party Computation (MPC)** enables multiple parties to jointly compute a function over their private inputs **without revealing those inputs to each other**.
+
+<Info>
+**Example**: Three companies want to know their combined revenue without revealing individual revenues to each other. MPC allows them to compute the sum `R₁ + R₂ + R₃` where each company only learns the total.
+</Info>
+
+## Core MPC Principles
+
+<CardGroup cols={2}>
+  <Card title="Privacy" icon="lock">
+    Parties learn only the output, nothing about other parties' inputs.
+  </Card>
+  <Card title="Correctness" icon="check">
+    The output is guaranteed to be correct even if some parties are malicious.
+  </Card>
+  <Card title="Input Independence" icon="shield">
+    Malicious parties cannot choose their inputs based on honest parties' inputs.
+  </Card>
+  <Card title="Fairness" icon="balance-scale">
+    Either all parties learn the output or none do (optional property).
+  </Card>
+</CardGroup>
+
+## MPC in Bron Crypto
+
+The Bron Crypto library focuses on MPC for **threshold cryptography**:
+
+**Location**: `pkg/mpc/`
+
+From the README:
+
+> The primary focus of this library is MPC (Multi-Party Computation), specifically threshold signing.
+
+### MPC Components
+
+```
+pkg/mpc/
+├── sharing/          # Secret sharing schemes
+├── tsig/            # Threshold signatures
+├── dkg/             # Distributed key generation
+├── rvole/           # Random Oblivious Linear Evaluation
+├── ot/              # Oblivious Transfer (in pkg/ot/)
+├── session/         # Session management
+├── refresh/         # Share refreshing
+├── recovery/        # Share recovery
+└── aor/             # Addition-Of-Randomness
+```
+
+## Fundamental MPC Building Blocks
+
+### 1. Secret Sharing
+
+**Location**: `pkg/mpc/sharing/`
+
+The foundation of threshold MPC - see [Threshold Cryptography](/concepts/threshold-cryptography) for details.
+
+**Key insight**: Split secrets so that:
+- Any `t` shares reconstruct the secret
+- Any `t-1` shares reveal **nothing**
+
+From `pkg/mpc/sharing/sharing.go:47`:
+
+```go
+type SSS[S Share[S], W Secret[W], 
+    DO DealerOutput[S], AC accessstructures.Monotone] interface {
+    Name() Name
+    Deal(secret W, prng io.Reader) (DO, error)
+    Reconstruct(shares ...S) (secret W, err error)
+    AccessStructure() AC
+}
+```
+
+### 2. Oblivious Transfer (OT)
+
+**Location**: `pkg/ot/`
+
+**Primitive**: A fundamental two-party protocol where:
+- **Sender** has two messages `(m₀, m₁)`
+- **Receiver** has a choice bit `b`
+- Receiver learns `mᵦ` but nothing about `m₁₋ᵦ`
+- Sender learns nothing about `b`
+
+From `pkg/ot/ot.go:34`:
+
+```go
+type SenderOutput[D any] struct {
+    Messages [][2][]D `cbor:"messages"`  // Pairs of messages
+}
+
+type ReceiverOutput[D any] struct {
+    Choices  []byte `cbor:"choices"`    // Choice bits
+    Messages [][]D  `cbor:"messages"`   // Selected messages
+}
+```
+
+**Use cases**:
+- **DKLs23 ECDSA**: OT used for secure multiplication in signing
+- **OT Extensions**: Generate many OTs from a few base OTs
+- **RVOLE**: Random Vector OLE built on OT
+
+<Accordion title="OT Extensions">
+**Problem**: Base OT protocols are expensive (public-key operations).
+
+**Solution**: OT Extensions use a few base OTs to generate many OTs cheaply (symmetric-key operations only).
+
+**Implementations**:
+- **Softspoken** (`pkg/mpc/rvole/softspoken/`) - Compatible with DKLs23 paper
+- **BBOT** (`pkg/mpc/rvole/bbot/`) - Batched Base OT, no extensions
+
+**Trade-off**:
+- Extensions: High setup cost, very low marginal cost
+- BBOT: Moderate cost per OT, no setup
+</Accordion>
+
+### 3. Commitment Schemes
+
+**Location**: `pkg/commitments/`
+
+Commitments enable parties to commit to a value without revealing it:
+
+1. **Commit phase**: Prover computes `C = Commit(m, r)` and sends `C`
+2. **Reveal phase**: Prover reveals `(m, r)`; verifier checks `C = Commit(m, r)`
+
+**Properties**:
+- **Hiding**: Commitment reveals nothing about `m`
+- **Binding**: Cannot change `m` after committing
+
+**Use in MPC**:
+- Prevent parties from changing inputs based on others' inputs
+- Ensure input independence
+- Bind parties to their messages before revealing
+
+### 4. Zero-Knowledge Proofs
+
+**Location**: `pkg/proofs/`
+
+Proofs that convince a verifier that a statement is true **without revealing why**.
+
+See [Zero-Knowledge Proofs](/concepts/zero-knowledge-proofs) for details.
+
+**Use in MPC**:
+- Prove correct behavior without revealing private inputs
+- Prevent malicious parties from disrupting protocols
+- Enable security against active adversaries
+
+## MPC Protocol Patterns
+
+### Pattern 1: Secure Addition
+
+**Goal**: Parties with private inputs `x₁, x₂, ..., xₙ` compute `sum = Σxᵢ`
+
+**Simple protocol**:
+1. Each party `i` generates random shares: `x₁ᵢ, x₂ᵢ, ..., xₙᵢ` such that `Σxⱼᵢ = xᵢ`
+2. Party `i` sends share `xⱼᵢ` to party `j`
+3. Each party sums received shares: `sumⱼ = Σᵢ xⱼᵢ`
+4. Parties reveal `sumⱼ` and compute `sum = Σⱼ sumⱼ`
+
+**Privacy**: Each party sees only random-looking shares, learns nothing about individual `xᵢ`.
+
+### Pattern 2: Secure Multiplication
+
+**Goal**: Parties with secret-shared `[x]` and `[y]` compute `[x·y]`
+
+**Challenge**: Multiplication is **much harder** than addition in MPC.
+
+**Solutions**:
+
+<CardGroup cols={2}>
+  <Card title="Paillier-based" icon="lock">
+    Use homomorphic encryption (Lindell17)
+    
+    - `Enc(x) · Enc(y)^z` helps compute products
+    - Requires ZK proofs for security
+  </Card>
+  <Card title="OT-based" icon="exchange-alt">
+    Use Oblivious Transfer (DKLs23)
+    
+    - Convert multiplication to OTs
+    - More efficient with OT extensions
+  </Card>
+</CardGroup>
+
+### Pattern 3: Distributed Key Generation
+
+**Goal**: Generate shared key without trusted dealer.
+
+**Location**: `pkg/mpc/dkg/gennaro/`
+
+**Protocol** (from `pkg/mpc/dkg/gennaro/README.md`):
+
+<Steps>
+  <Step title="Everyone Deals">
+    Each party acts as dealer for Pedersen VSS:
+    - Deal random secret
+    - Broadcast verification vector
+  </Step>
+  
+  <Step title="Prove Correctness">
+    Each dealer proves well-formedness:
+    - Lift to Feldman VSS
+    - Attach batch Schnorr proof
+  </Step>
+  
+  <Step title="Verify and Aggregate">
+    All parties verify and combine:
+    - Check all proofs
+    - Sum all verification vectors → joint public key
+    - Sum all received shares → personal share
+  </Step>
+</Steps>
+
+**Result**: Shared secret that **no party knows**, only the joint public key is known.
+
+## Session Management
+
+**Location**: `pkg/mpc/session/`
+
+MPC protocols must prevent replay attacks and ensure message freshness:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/network"
+
+// Each protocol execution has unique session ID
+sessionID := network.NewSID()
+
+// Use in participant creation
+participant := protocol.NewParticipant(
+    sessionID,    // Unique per execution
+    myID,         // My party ID
+    allParties,   // All participant IDs
+    ...,
+)
+```
+
+**Session ID properties**:
+- Binds messages to specific protocol instance
+- Prevents replaying messages from old sessions
+- Typically includes timestamp, random nonce, and context
+
+## Communication Patterns
+
+**Location**: `pkg/network/`
+
+### Broadcast Channel
+
+**Requirement**: All parties receive the same message from sender.
+
+**Implementation**: `pkg/network/echo/`
+
+**Echo Broadcast Protocol**:
+1. Sender sends message `m` to all parties
+2. Each party echoes hash `H(m)` to all others
+3. Accept `m` only if enough parties echo the same hash
+
+**Why needed**: Prevents sender from sending different messages to different parties.
+
+### Point-to-Point Channels
+
+Private communication between two parties:
+
+**Requirements**:
+- **Authenticated**: Verify sender identity
+- **Confidential**: Encrypted communication (optional, depends on protocol)
+- **Reliable**: Messages delivered in order
+
+**Implementation**: Application's responsibility (TLS, noise protocol, etc.)
+
+### Message Routing
+
+From `pkg/network/router.go` and `pkg/network/exchange.go`:
+
+```go
+type Router interface {
+    // Send message to specific party
+    Send(to PartyID, message []byte) error
+    
+    // Broadcast to all parties
+    Broadcast(message []byte) error
+    
+    // Receive messages
+    Receive(from PartyID) ([]byte, error)
+}
+```
+
+**Note**: Bron Crypto provides **abstractions only**. Actual networking (TCP, WebSockets, gRPC) is out of scope.
+
+## Security Models
+
+### Adversary Types
+
+<CardGroup cols={2}>
+  <Card title="Passive (Semi-Honest)" icon="eye">
+    **Behavior**: Follows protocol but tries to learn extra information
+    
+    **Defense**: Protocol design ensures privacy
+    
+    **Easier**: Simpler protocols, better performance
+  </Card>
+  <Card title="Active (Malicious)" icon="user-ninja">
+    **Behavior**: Can deviate arbitrarily from protocol
+    
+    **Defense**: Zero-knowledge proofs, verifiable secret sharing
+    
+    **Harder**: Complex protocols, more computation
+  </Card>
+</CardGroup>
+
+Bron Crypto protocols target **active (malicious) adversaries**.
+
+### Corruption Models
+
+**Static corruption**: Adversary chooses which parties to corrupt **before** protocol starts.
+
+**Adaptive corruption**: Adversary can corrupt parties **during** protocol execution.
+
+**Threshold**: Adversary can corrupt up to `t-1` out of `n` parties.
+
+<Info>
+For (t, n)-threshold schemes, security holds as long as **at most `t-1` parties are corrupted**.
+</Info>
+
+### Security Guarantees
+
+MPC protocols provide:
+
+1. **Privacy**: Corrupted parties learn only:
+   - Their own inputs
+   - The final output
+   - Information that can be derived from these
+
+2. **Correctness**: Output is correct even if up to `t-1` parties are malicious.
+
+3. **Input Independence**: Malicious parties must choose inputs before seeing honest parties' shares.
+
+## Advanced MPC Techniques
+
+### Share Refreshing
+
+**Location**: `pkg/mpc/refresh/`
+
+**Goal**: Generate new shares of the same secret without reconstructing it.
+
+**Protocol**:
+1. Each party generates zero-shares (sum to zero)
+2. Distribute zero-shares to other parties
+3. Add received zero-shares to own share
+
+**Result**: New shares that are unlinkable to old shares but reconstruct to the same secret.
+
+**Use case**: Proactive security - protect against slow adversaries who compromise parties over time.
+
+### Share Recovery
+
+**Location**: `pkg/mpc/recovery/`
+
+**Scenario**: Party `i` loses their share `sᵢ`.
+
+**Protocol**: Other parties use their shares to reconstruct `sᵢ` for party `i`.
+
+**Security**: Requires `t` honest parties to participate. The secret itself is never reconstructed.
+
+### Addition of Randomness (AOR)
+
+**Location**: `pkg/mpc/aor/`
+
+**Goal**: Parties with shared `[x]` compute `[x + r]` for random `r` unknown to anyone.
+
+**Use case**: Randomize shared values in protocols.
+
+### Random Vector OLE (RVOLE)
+
+**Location**: `pkg/mpc/rvole/`
+
+**Primitive**: Parties obtain correlated randomness:
+- Party 1 gets random `(a, b)`
+- Party 2 gets random `c` such that `c = a · Δ + b` for global `Δ`
+
+**Use case**: Building block for efficient MPC multiplication.
+
+**Implementations**:
+- **Softspoken** (`softspoken/`) - OT extension based
+- **BBOT** (`bbot/`) - Batched base OT
+
+## Threshold Signature Protocols
+
+The main application of MPC in Bron Crypto:
+
+**Location**: `pkg/mpc/tsig/`
+
+### Threshold Schnorr (Lindell22)
+
+**Two-round signing**:
+
+1. **Round 1**: Each party generates nonce share, commits
+2. **Round 2**: Combine nonces, compute signature shares
+3. **Aggregation**: Sum signature shares → final signature
+
+**MPC operations**: Addition over shares (simple)
+
+### Threshold ECDSA (DKLs23)
+
+**More complex** - requires secure multiplication:
+
+1. **Preprocessing**: Generate correlated randomness (OT or RVOLE)
+2. **Signing rounds**: Use randomness for secure multiplication
+3. **Signature shares**: Each party outputs share
+4. **Aggregation**: Combine shares → ECDSA signature
+
+**MPC operations**: 
+- Addition
+- Multiplication (via OT or Paillier)
+- Modular inversion (shared)
+
+### Threshold BLS (Boldyreva02)
+
+**Simplest** - just threshold secret sharing:
+
+1. Each party signs with their share: `σᵢ = H(m)^{sᵢ}`
+2. Aggregate: `σ = ∏σᵢ = H(m)^{Σsᵢ} = H(m)^s`
+
+**MPC operations**: None beyond secret sharing (addition only)
+
+## Practical Considerations
+
+### Network Latency
+
+MPC protocols are **interactive** - multiple rounds of communication:
+
+**Round complexity** matters:
+- **2 rounds**: ~2× network latency
+- **5 rounds**: ~5× network latency
+
+**Optimization**: Batch operations, preprocessing
+
+### Communication Cost
+
+**Broadcast**: Expensive - O(n²) messages for n parties
+
+**Optimizations**:
+- Use broadcast only when necessary
+- Aggregate messages
+- Compress data
+
+### Computation Cost
+
+**Expensive operations** in MPC:
+- Public-key operations (elliptic curve, RSA)
+- Zero-knowledge proofs
+- Base Oblivious Transfers
+
+**Cheap operations**:
+- Addition of shares
+- Hash functions
+- Symmetric encryption
+
+**Optimization**: Amortize expensive operations (OT extensions, preprocessing)
+
+### Error Handling
+
+MPC protocols can abort if:
+- A party sends invalid messages
+- Zero-knowledge proofs fail
+- Timeouts occur
+
+**Strategies**:
+1. **Identify culprit**: Use zero-knowledge proofs to blame misbehaving party
+2. **Abort and retry**: Restart with different party set
+3. **Fault tolerance**: Design protocol to tolerate some failures
+
+## Example: Two-Party ECDSA Multiplication
+
+Here's how DKLs23 uses OT for secure multiplication:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/mpc/rvole"
+
+// Parties have shares: Party 1 has a₁, Party 2 has a₂
+// Goal: Compute shares of a₁ · a₂
+
+// Use RVOLE for correlated randomness
+rvoleOutput := rvole.Execute(...)
+
+// Party 1:
+func Party1Multiply(a1 Scalar, rvole *RVOLEOutput) Share {
+    // Use OT-based multiplication
+    // ... complex protocol ...
+    return multiplicationShare1
+}
+
+// Party 2:
+func Party2Multiply(a2 Scalar, rvole *RVOLEOutput) Share {
+    // Complementary computation
+    // ... complex protocol ...
+    return multiplicationShare2
+}
+
+// Later: multiplicationShare1 + multiplicationShare2 = a₁ · a₂
+```
+
+**Key insight**: Using OT-generated randomness to mask values during multiplication.
+
+## MPC Best Practices
+
+### 1. Use Authenticated Channels
+
+```go
+// Bad: Unauthenticated communication
+conn, _ := net.Dial("tcp", address)
+
+// Good: TLS for authentication
+tlsConn, _ := tls.Dial("tcp", address, tlsConfig)
+```
+
+### 2. Implement Broadcast Correctly
+
+Use echo broadcast to ensure consistency:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/network/echo"
+
+broadcaster := echo.NewBroadcast(sessionID, partyID, allParties, ...)
+message := []byte("my message")
+
+// Sender
+broadcaster.Send(message)
+
+// Receivers
+receivedMessage, senderID := broadcaster.Receive()
+```
+
+### 3. Handle Aborts Gracefully
+
+```go
+func RunProtocol() (*Output, error) {
+    result, err := participant.ExecuteRound(...)
+    if err != nil {
+        // Identify misbehaving party if possible
+        culprit := participant.IdentifyError(err)
+        return nil, fmt.Errorf("party %v misbehaved: %w", culprit, err)
+    }
+    return result, nil
+}
+```
+
+### 4. Use Unique Session IDs
+
+```go
+import "crypto/rand"
+
+// Generate unique session ID for each execution
+func NewProtocolSession() SessionID {
+    sessionID := make([]byte, 32)
+    rand.Read(sessionID)
+    return SessionID(sessionID)
+}
+```
+
+### 5. Verify All Inputs
+
+In malicious security model, **verify everything**:
+
+```go
+// Good: Verify signature shares before aggregation
+for i, share := range signatureShares {
+    if !verifySignatureShare(share, publicKeyShares[i]) {
+        return nil, fmt.Errorf("invalid share from party %d", i)
+    }
+}
+
+// Then aggregate
+finalSignature := aggregateShares(signatureShares)
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Threshold Cryptography" icon="users" href="/concepts/threshold-cryptography">
+    Secret sharing and threshold signatures built on MPC
+  </Card>
+  <Card title="Zero-Knowledge Proofs" icon="eye-slash" href="/concepts/zero-knowledge-proofs">
+    Proofs ensuring correctness in malicious MPC
+  </Card>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    MPC package structure and components
+  </Card>
+  <Card title="Security Model" icon="shield-halved" href="/concepts/security">
+    Security guarantees of MPC protocols
+  </Card>
+</CardGroup>

@@ -1,0 +1,153 @@
+---
+title: Introduction
+description: Advanced cryptography library for multi-party computation, threshold signatures, and zero-knowledge proofs
+---
+
+<div style={{
+  background: 'linear-gradient(135deg, #0f0b1d 0%, #1a1530 100%)',
+  borderRadius: '20px',
+  padding: '48px 32px',
+  marginBottom: '32px',
+  border: '1px solid rgba(187, 168, 234, 0.1)'
+}}>
+  <h1 style={{
+    fontSize: '56px',
+    fontWeight: '900',
+    fontFamily: 'Inter',
+    color: '#ffffff',
+    marginBottom: '16px',
+    lineHeight: '1.2'
+  }}>
+    Bron Crypto
+  </h1>
+  <p style={{
+    fontSize: '22px',
+    fontWeight: '400',
+    fontFamily: 'Inter',
+    color: '#bba8ea',
+    marginBottom: '32px',
+    maxWidth: '800px'
+  }}>
+    State-of-the-art cryptographic protocols for threshold signatures, multi-party computation, and zero-knowledge proofs. Written by cryptographers for cryptographers.
+  </p>
+  <div style={{ display: 'flex', gap: '16px', flexWrap: 'wrap' }}>
+    <a href="/quickstart" style={{
+      background: 'rgba(255, 140, 0, 1)',
+      color: '#ffffff',
+      padding: '12px 32px',
+      borderRadius: '20px',
+      textDecoration: 'none',
+      fontWeight: '700',
+      fontFamily: 'Inter',
+      fontSize: '16px',
+      display: 'inline-block',
+      transition: 'all 0.2s'
+    }}>
+      Get Started
+    </a>
+    <a href="https://github.com/bronlabs/bron-crypto" style={{
+      background: 'transparent',
+      color: '#ffffff',
+      padding: '12px 32px',
+      borderRadius: '20px',
+      border: '2px solid rgba(187, 168, 234, 0.3)',
+      textDecoration: 'none',
+      fontWeight: '700',
+      fontFamily: 'Inter',
+      fontSize: '16px',
+      display: 'inline-block',
+      transition: 'all 0.2s'
+    }}>
+      View on GitHub
+    </a>
+  </div>
+</div>
+
+## Overview
+
+Bron Crypto is an advanced cryptography library providing implementations of state-of-the-art cryptographic protocols. Built using modern software engineering practices, it operates at the frontier of cryptographic research with a focus on security, reusability, and redundancy.
+
+<CardGroup cols={2}>
+  <Card title="Threshold Signatures" icon="signature" href="/api/mpc/threshold-schnorr">
+    Support for Schnorr, ECDSA, and BLS threshold signature schemes
+  </Card>
+  <Card title="Multi-Party Computation" icon="users" href="/concepts/mpc">
+    Distributed key generation, secret sharing, and MPC protocols
+  </Card>
+  <Card title="Zero-Knowledge Proofs" icon="shield-check" href="/api/proofs/sigma-protocols">
+    Sigma protocols with Fiat-Shamir and Fischlin compilers
+  </Card>
+  <Card title="Cryptographic Primitives" icon="lock" href="/api/primitives/encryption">
+    Homomorphic encryption, commitments, and hashing primitives
+  </Card>
+</CardGroup>
+
+## Key Features
+
+<AccordionGroup>
+  <Accordion title="Threshold Signature Schemes" icon="pen-nib">
+    - **Threshold Schnorr** - Lindell22 implementation ([reference](https://eprint.iacr.org/2022/374))
+    - **Threshold ECDSA** - DKLs23 and Lindell17 variants ([DKLs23](https://eprint.iacr.org/2023/765), [Lindell17](https://eprint.iacr.org/2017/552))
+    - **Threshold BLS** - Boldyreva02 implementation ([reference](https://link.springer.com/chapter/10.1007/3-540-36288-6_3))
+    - Multiple DKLs23 variants: with OT extensions, without OT extensions, and base OT during signing
+  </Accordion>
+
+  <Accordion title="Cryptographic Building Blocks" icon="cube">
+    - **Sigma Protocols** - Modular design with compiler support (Fiat-Shamir, Fischlin, Randomised Fischlin)
+    - **Protocol Composition** - AND and OR composition with minimal additional code
+    - **Homomorphic Encryption** - Paillier encryption with modular arithmetic
+    - **Commitments** - Pedersen and hash-based commitment schemes
+    - **Oblivious Transfer** - Base OT and OT extension protocols
+  </Accordion>
+
+  <Accordion title="Design Principles" icon="compass-drafting">
+    - **Redundancy** - Alternative implementations with different cryptographic assumptions for protocol-level vulnerability mitigation
+    - **Reusability** - Modular design enabling code reuse across applications
+    - **Side-Channel Resistance** - Built on side-channel resistant elliptic curve and big integer operations
+    - **Interface-Driven** - Extensive use of Go interfaces for maximum flexibility
+  </Accordion>
+</AccordionGroup>
+
+## Security Notice
+
+<Warning>
+This library is intended for use by experienced cryptographers and developers who understand the security implications of the protocols involved. If you are not familiar with the underlying cryptographic primitives, please consult with a cryptography expert before using this library in production.
+</Warning>
+
+The library has been audited by [Trail of Bits](https://github.com/trailofbits/publications?tab=readme-ov-file#cryptography-reviews). The audit report is available in the [audits directory](https://github.com/bronlabs/bron-crypto/tree/main/audits).
+
+While the library builds on a side-channel resistant foundation (elliptic curves via fiat-cryptography and big integer operations via saferith/borinssl), it is not designed to be fully side-channel resistant at all levels.
+
+## Architecture
+
+The library is organized into focused packages:
+
+- **`pkg/mpc/tsig/`** - Threshold signature implementations (Schnorr, ECDSA, BLS)
+- **`pkg/mpc/`** - MPC primitives including DKG, secret sharing, and session management
+- **`pkg/proofs/`** - Zero-knowledge proof systems and sigma protocols
+- **`pkg/encryption/`** - Encryption schemes including Paillier and HPKE
+- **`pkg/commitments/`** - Commitment schemes (Pedersen, hash-based)
+- **`pkg/signatures/`** - Standard signature schemes (Schnorr, ECDSA, BLS)
+- **`pkg/ot/`** - Oblivious transfer protocols and extensions
+- **`pkg/base/`** - Foundation libraries (curves, algebra, number theory)
+
+<Info>
+Threshold signing protocols are designed to be stateless. Orchestration (including networking) is out of scope for this library and must be implemented separately.
+</Info>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install the library and set up build prerequisites
+  </Card>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Get started with your first threshold signature
+  </Card>
+  <Card title="Core Concepts" icon="book" href="/concepts/architecture">
+    Learn about the library's architecture and design
+  </Card>
+  <Card title="API Reference" icon="code" href="/api/mpc/threshold-schnorr">
+    Explore the complete API documentation
+  </Card>
+</CardGroup>

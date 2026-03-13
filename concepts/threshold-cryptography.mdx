@@ -1,0 +1,583 @@
+---
+title: 'Threshold Cryptography'
+description: 'Understanding secret sharing, threshold signatures, and distributed key generation'
+icon: 'users'
+---
+
+## What is Threshold Cryptography?
+
+Threshold cryptography enables **multiple parties to collectively perform cryptographic operations** without any single party having access to the complete secret key.
+
+<CardGroup cols={2}>
+  <Card title="Key Property" icon="key">
+    No single party ever possesses the complete private key.
+  </Card>
+  <Card title="Threshold Requirement" icon="users">
+    At least `t` out of `n` parties must cooperate to sign.
+  </Card>
+  <Card title="Security" icon="shield">
+    Up to `t-1` parties can be compromised without losing security.
+  </Card>
+  <Card title="Availability" icon="check">
+    Only `t` parties needed (not all `n`) for operation.
+  </Card>
+</CardGroup>
+
+## Core Concepts
+
+### Secret Sharing
+
+**Location**: `pkg/mpc/sharing/`
+
+Secret sharing splits a secret `s` into `n` shares such that:
+- Any `t` shares can reconstruct `s`
+- Any `t-1` shares reveal **no information** about `s`
+
+This is called a **(t, n)-threshold scheme**.
+
+<Info>
+**Example**: A (3, 5)-threshold scheme splits a secret among 5 parties. Any 3 can reconstruct it, but 2 or fewer learn nothing.
+</Info>
+
+#### Shamir's Secret Sharing
+
+**Location**: `pkg/mpc/sharing/scheme/shamir/`
+
+The most widely used threshold secret sharing scheme.
+
+**How it works**:
+
+1. Choose a random polynomial of degree `t-1`:
+   ```
+   f(x) = s + a₁x + a₂x² + ... + a_{t-1}x^{t-1}
+   ```
+   where `s` is the secret (constant term).
+
+2. Generate shares by evaluating the polynomial:
+   ```
+   Share_i = f(i) for i = 1, 2, ..., n
+   ```
+
+3. Reconstruct using Lagrange interpolation with any `t` shares:
+   ```
+   s = f(0) = Σ λᵢ · Share_i
+   ```
+   where `λᵢ` are Lagrange coefficients.
+
+From `pkg/mpc/sharing/scheme/shamir/shamir.go:15`:
+
+```go
+// DealerFunc is the polynomial used by the dealer to generate shares.
+// The secret is f(0) and each share i is f(i).
+type DealerFunc[FE algebra.PrimeFieldElement[FE]] = 
+    *polynomials.Polynomial[FE]
+```
+
+**Lagrange Coefficients**: Convert Shamir shares to additive shares (`pkg/mpc/sharing/scheme/shamir/shamir.go:35`):
+
+```go
+// LagrangeCoefficients computes λ_i for i ∈ S
+// For shareholder i, λᵢ = ∏_{j∈S,j≠i} j/(j-i)
+func LagrangeCoefficients[FE algebra.PrimeFieldElement[FE]](
+    field algebra.PrimeField[FE], 
+    sharingIDs ...sharing.ID,
+) (ds.Map[sharing.ID, FE], error)
+```
+
+#### Verifiable Secret Sharing (VSS)
+
+**Problem**: A malicious dealer could distribute inconsistent shares.
+
+**Solution**: VSS allows shareholders to verify their shares are consistent.
+
+<CardGroup cols={2}>
+  <Card title="Feldman VSS" icon="eye">
+    **Location**: `pkg/mpc/sharing/vss/feldman/`
+    
+    **Public verification**: Dealer broadcasts commitments `Cᵢ = g^aᵢ`
+    
+    **Verification**: Check `g^{Share_i} = ∏ Cⱼ^{i^j}`
+    
+    **Trade-off**: Reveals information about shares
+  </Card>
+  <Card title="Pedersen VSS" icon="eye-slash">
+    **Location**: `pkg/mpc/sharing/vss/pedersen/`
+    
+    **Hiding**: Uses commitments `Cᵢ = g^aᵢ · h^rᵢ`
+    
+    **Verification**: Same as Feldman but computationally hiding
+    
+    **Trade-off**: Requires trusted setup for `h`
+  </Card>
+</CardGroup>
+
+From `pkg/mpc/sharing/sharing.go:58`:
+
+```go
+// VSSS (Verifiable Secret Sharing Scheme) extends SSS with verification
+type VSSS[
+    S Share[S], 
+    W Secret[W], 
+    V VerificationMaterial, 
+    DO VerifiableDealerOutput[S, V], 
+    AC accessstructures.Monotone,
+] interface {
+    SSS[S, W, DO, AC]
+    ReconstructAndVerify(reference V, shares ...S) (secret W, err error)
+    Verify(share S, reference V) (err error)
+}
+```
+
+### Threshold Signatures
+
+**Location**: `pkg/mpc/tsig/`
+
+Threshold signatures extend secret sharing to **signature generation**:
+
+1. **Key Generation**: Distribute key shares among `n` parties
+2. **Signing**: At least `t` parties collaborate to sign
+3. **Verification**: Standard signature verification (single public key)
+
+<Info>
+**Important**: The final signature is **indistinguishable** from a signature generated with a single key. The threshold property is invisible to verifiers.
+</Info>
+
+#### Supported Protocols
+
+The library implements three threshold signature schemes:
+
+<Accordion title="Threshold Schnorr (Lindell22)">
+**Location**: `pkg/mpc/tsig/tschnorr/lindell22/`
+
+**Paper**: [Lindell 2022](https://eprint.iacr.org/2022/374)
+
+**Overview**:
+- Simple and efficient
+- Two-round signing protocol  
+- Based on discrete logarithm assumption
+- Compatible with standard Schnorr signatures
+
+**Use cases**: Bitcoin Taproot, general Schnorr signatures
+</Accordion>
+
+<Accordion title="Threshold ECDSA (DKLs23 & Lindell17)">
+**Locations**: 
+- `pkg/mpc/tsig/tecdsa/dkls23/`
+- `pkg/mpc/tsig/tecdsa/lindell17/`
+
+**Papers**: 
+- [DKLs23](https://eprint.iacr.org/2023/765)
+- [Lindell17](https://eprint.iacr.org/2017/552)
+
+**DKLs23** - Modern, efficient protocol:
+- Uses Oblivious Transfer for multiplication
+- Three variants (with OT extensions, BBOT, inline base OT)
+- Fewer rounds, better performance
+
+**Lindell17** - Alternative approach:
+- Uses Paillier homomorphic encryption
+- Different security assumptions
+- Fallback option for protocol diversity
+
+**Use cases**: Bitcoin, Ethereum, any ECDSA-compatible system
+</Accordion>
+
+<Accordion title="Threshold BLS (Boldyreva02)">
+**Location**: `pkg/mpc/tsig/tbls/boldyreva02/`
+
+**Paper**: [Boldyreva 2002](https://link.springer.com/chapter/10.1007/3-540-36288-6_3)
+
+**Overview**:
+- Based on bilinear pairings
+- Simple threshold scheme (shares are just BLS keys)
+- Signature aggregation
+- Deterministic signatures
+
+**Use cases**: Ethereum 2.0, consensus protocols, aggregated signatures
+</Accordion>
+
+### Distributed Key Generation (DKG)
+
+**Location**: `pkg/mpc/dkg/gennaro/`
+
+**Problem**: How do parties generate shared keys **without a trusted dealer**?
+
+**Solution**: Distributed Key Generation protocol
+
+#### Gennaro DKG Protocol
+
+Implements [Gennaro et al. 2006](https://link.springer.com/content/pdf/10.1007/s00145-006-0347-3.pdf)
+
+From `pkg/mpc/dkg/gennaro/README.md`:
+
+**Round 1: Pedersen Deal**
+- Everyone deals a Pedersen VSS instance
+- Broadcast verification vector
+- Shares are hiding (information-theoretically)
+
+**Round 2: Feldman Lift**
+- Dealers privately send Pedersen shares
+- Lift dealer polynomial into exponent
+- Broadcast Feldman verification vector with batch Schnorr proof
+
+**Round 3: Verify & Aggregate**
+- Verify proofs and shares
+- Add all Feldman vectors → joint public key
+- Add all shares → personal key share
+
+<Info>
+**Result**: Each party holds a share of a joint private key, and all parties know the joint public key. **No party ever knows the complete private key.**
+</Info>
+
+**Batch Schnorr Proofs**: Used to prove well-formedness of Feldman vectors
+
+**Location**: `pkg/proofs/dlog/batch_schnorr/`
+
+Proves knowledge of multiple discrete logarithms efficiently:
+```
+Prove: X₁ = g^w₁, X₂ = g^w₂, ..., Xₙ = g^wₙ
+```
+
+More efficient than `n` individual proofs.
+
+## Protocol Flow Example
+
+### Complete Threshold Signature Flow
+
+Here's how the pieces fit together for a (3, 5)-threshold ECDSA:
+
+<Steps>
+  <Step title="Distributed Key Generation">
+    5 parties run Gennaro DKG:
+    
+    ```go
+    // Each party i:
+    participant := gennaro.NewParticipant(sessionID, partyID, threshold, allParties, ...)
+    
+    // Round 1: Deal Pedersen VSS
+    round1Out := participant.Round1()
+    
+    // Round 2: Lift to Feldman with proofs  
+    round2Out := participant.Round2(round1Broadcasts)
+    
+    // Round 3: Aggregate
+    dkgOutput := participant.Round3(round2Broadcasts, round2Unicasts)
+    ```
+    
+    **Result**: 
+    - Each party has share `sᵢ` of joint private key `s`
+    - All parties know joint public key `PK = g^s`
+  </Step>
+  
+  <Step title="Threshold Signing">
+    Any 3+ parties collaborate to sign message `m`:
+    
+    ```go
+    // Each participating party:
+    signer := dkls23.NewSigner(dkgOutput.Share(), message, ...)
+    
+    // Exchange messages (protocol-specific rounds)
+    // ...
+    
+    // Each party outputs signature share
+    sigShare := signer.FinalizeShare()
+    ```
+  </Step>
+  
+  <Step title="Signature Aggregation">
+    Combine signature shares:
+    
+    ```go
+    // Any party (or external coordinator):
+    signature := AggregateSignatureShares(sigShares, publicKey)
+    ```
+    
+    **Result**: Standard ECDSA signature `(r, s)`
+  </Step>
+  
+  <Step title="Verification">
+    Anyone can verify with the public key:
+    
+    ```go
+    // Standard ECDSA verification:
+    valid := ecdsa.Verify(publicKey, message, signature)
+    ```
+    
+    **Verifier cannot tell** this was a threshold signature!
+  </Step>
+</Steps>
+
+## Access Structures
+
+**Location**: `pkg/mpc/sharing/accessstructures/`
+
+Define which sets of parties are **authorized** to reconstruct secrets:
+
+<CardGroup cols={2}>
+  <Card title="Threshold" icon="users">
+    **File**: `threshold/`
+    
+    Any `t` out of `n` parties
+    
+    **Example**: (3, 5) - any 3 of 5 parties
+  </Card>
+  <Card title="Unanimity" icon="handshake">
+    **File**: `unanimity/`  
+    
+    All `n` parties required
+    
+    **Example**: All 5 parties must participate
+  </Card>
+  <Card title="Hierarchical" icon="sitemap">
+    **File**: `hierarchical/`
+    
+    Different thresholds for different groups
+    
+    **Example**: (2 of 3 admins) OR (5 of 7 users)
+  </Card>
+  <Card title="General Boolean" icon="code-branch">
+    **File**: `boolexpr/`
+    
+    Arbitrary AND/OR combinations
+    
+    **Example**: (Alice AND Bob) OR (Carol AND David AND Eve)
+  </Card>
+</CardGroup>
+
+## Share Types
+
+### Additive Shares
+
+**Location**: `pkg/mpc/sharing/scheme/additive/`
+
+Simplest secret sharing:
+```
+s = s₁ + s₂ + ... + sₙ (mod q)
+```
+
+**Properties**:
+- Simple XOR or addition
+- Requires all `n` parties (unanimity)
+- No threshold property
+- Very efficient
+
+**Use case**: Converting Shamir shares for MPC operations
+
+### Linear Shares
+
+**Location**: `pkg/mpc/sharing/sharing.go:71`
+
+```go
+type LinearShare[S Share[S], SV any] interface {
+    Share[S]
+    algebra.HomomorphicLike[S, SV]
+    algebra.Actable[S, algebra.Numeric]
+}
+```
+
+**Properties**:
+- Support homomorphic operations (add shares)
+- Support scalar multiplication
+- Can convert to additive shares using Lagrange coefficients
+
+**Examples**: Shamir shares are linear shares
+
+### Converting Between Share Types
+
+From `pkg/mpc/sharing/sharing.go:94`:
+
+```go
+// LSSS enables converting Shamir shares to additive shares
+type LSSS[...] interface {
+    SSS[S, W, DO, AC]
+    // Convert threshold share to additive share
+    ConvertShareToAdditive(S, *unanimity.Unanimity) 
+        (*internal.AdditiveShare[WV], error)
+}
+```
+
+**Why convert?** Many MPC protocols operate more efficiently on additive shares.
+
+## Security Properties
+
+### Information-Theoretic Security
+
+Shamir secret sharing provides **perfect secrecy**:
+
+<Info>
+Given `t-1` shares, **every possible secret is equally likely**. An attacker with `t-1` shares has **zero information** about the secret.
+</Info>
+
+This holds even against computationally unbounded adversaries.
+
+### Computational Security
+
+Threshold signature protocols rely on computational assumptions:
+
+- **Discrete Logarithm Problem** (Schnorr, BLS)
+- **Elliptic Curve Discrete Log** (ECDSA)
+- **Decisional Composite Residuosity** (Paillier in Lindell17)
+- **Oblivious Transfer security** (DKLs23)
+
+### Adversary Models
+
+<CardGroup cols={2}>
+  <Card title="Passive (Honest-but-Curious)" icon="eye">
+    Adversary follows protocol but tries to learn secrets.
+    
+    **Defense**: Zero-knowledge proofs
+  </Card>
+  <Card title="Active (Malicious)" icon="user-ninja">
+    Adversary can deviate from protocol arbitrarily.
+    
+    **Defense**: Verifiable Secret Sharing, zero-knowledge proofs of correctness
+  </Card>
+</CardGroup>
+
+Bron Crypto protocols are designed for **active (malicious) adversaries**.
+
+## Practical Considerations
+
+### Choosing Parameters
+
+**Threshold `t`**: Balance security vs availability
+
+- **Higher `t`**: More security (more parties must be compromised)
+- **Lower `t`**: Better availability (fewer parties needed to operate)
+
+**Common choices**:
+- `(2, 3)` - Minimum threshold with backup
+- `(3, 5)` - Good balance
+- `(t, 2t-1)` - Maximum security for given `n`
+
+<Warning>
+**Dishonest majority**: If `t ≤ n/2`, an adversary controlling `t` parties can break security. Use `t > n/2` for dishonest majority tolerance.
+</Warning>
+
+### Network Requirements
+
+Threshold protocols require communication:
+
+**Broadcast channel**: All parties must receive the same messages
+- Implementation: `pkg/network/echo/`
+- Prevents man-in-the-middle attacks
+- Essential for security
+
+**Authenticated channels**: Point-to-point secure communication
+- Must prevent impersonation
+- Typically use TLS or similar
+
+**Session identifiers**: Prevent replay attacks
+- Unique ID per protocol execution  
+- Binds messages to specific instances
+
+### Performance Characteristics
+
+**DKG complexity**:
+- Communication: O(n²) broadcasts
+- Computation: O(n) per party
+- One-time setup cost
+
+**Signing complexity**:
+- **BLS**: O(t) - just aggregate shares
+- **Schnorr**: O(t) - two rounds
+- **ECDSA (DKLs23)**: O(t²) - more complex protocol
+
+## Advanced Topics
+
+### Proactive Security
+
+**Location**: `pkg/mpc/refresh/`
+
+Periodically refresh shares without changing the secret:
+- Protects against slow, adaptive adversaries
+- Shares leaked in the past become useless
+- No interaction with secret or public key
+
+### Share Recovery
+
+**Location**: `pkg/mpc/recovery/`
+
+If a party loses their share:
+- Other parties can help reconstruct it
+- Requires threshold of honest parties
+- Does not reveal the secret
+
+### Presignature Optimization
+
+Some protocols support **preprocessing**:
+- Generate signature shares before message is known
+- Signing becomes very fast once message arrives
+- Trade-off: Storage for presignatures
+
+## Example: Building a Threshold Wallet
+
+Putting it all together:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/mpc/dkg/gennaro"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tecdsa/dkls23"
+)
+
+// Setup: 3-of-5 threshold
+threshold := 3
+numParties := 5
+
+// Phase 1: Distributed Key Generation
+func SetupWallet() *WalletShare {
+    participant := gennaro.NewParticipant(
+        sessionID, myID, threshold, allPartyIDs, curve, rand.Reader,
+    )
+    
+    // Run 3 rounds of DKG
+    round1 := participant.Round1()
+    // ... exchange messages ...
+    round2 := participant.Round2(round1Messages)
+    // ... exchange messages ...
+    dkgOutput := participant.Round3(round2Messages)
+    
+    return &WalletShare{
+        Share: dkgOutput.Share(),
+        PublicKey: dkgOutput.PublicKey(),
+    }
+}
+
+// Phase 2: Sign transaction  
+func SignTransaction(share *WalletShare, txHash []byte) *Signature {
+    // Need 3 parties to participate
+    signer := dkls23.NewSigner(share.Share, txHash, ...)
+    
+    // Run signing protocol
+    // ... exchange messages ...
+    
+    sigShare := signer.FinalizeShare()
+    
+    // Aggregate shares from 3 parties
+    signature := AggregateShares(sigShare, otherShares...)
+    
+    return signature
+}
+
+// Phase 3: Anyone can verify
+func VerifyTransaction(pubKey *PublicKey, txHash []byte, sig *Signature) bool {
+    return ecdsa.Verify(pubKey, txHash, sig)
+}
+```
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Package structure for threshold protocols
+  </Card>
+  <Card title="MPC Fundamentals" icon="handshake" href="/concepts/mpc">
+    Multi-party computation concepts
+  </Card>
+  <Card title="Zero-Knowledge Proofs" icon="eye-slash" href="/concepts/zero-knowledge-proofs">
+    Proofs used in threshold protocols
+  </Card>
+  <Card title="Security Model" icon="shield-halved" href="/concepts/security">
+    Security guarantees and boundaries
+  </Card>
+</CardGroup>

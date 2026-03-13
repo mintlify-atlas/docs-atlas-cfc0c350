@@ -1,0 +1,498 @@
+---
+title: 'Hashing'
+description: 'Cryptographic hash functions including SHA, BLAKE2, KMAC, and Poseidon'
+---
+
+## Overview
+
+The hashing package provides utilities for cryptographic hashing with support for:
+
+- **Standard Hash Functions**: SHA-256, SHA-512, BLAKE2b/s
+- **KMAC**: Keccak Message Authentication Code (NIST SP 800-185)
+- **BIP-340**: Tagged hashing for Bitcoin Schnorr signatures
+- **Poseidon**: ZK-friendly hash function for algebraic circuits
+
+## Core Functions
+
+### Hash
+
+Iteratively writes inputs to a hash function and returns the digest.
+
+```go
+func Hash[H hash.Hash](hashFunc func() H, xs ...[]byte) ([]byte, error)
+```
+
+<ParamField path="hashFunc" type="func() H" required>
+  Hash function constructor (e.g., `sha256.New`)
+</ParamField>
+
+<ParamField path="xs" type="...[]byte">
+  Variable number of byte slices to hash
+</ParamField>
+
+<ResponseField name="digest" type="[]byte">
+  Hash digest output
+</ResponseField>
+
+**Example:**
+
+```go
+import (
+    "crypto/sha256"
+    "github.com/bronlabs/bron-crypto/pkg/hashing"
+)
+
+digest, err := hashing.Hash(sha256.New, []byte("hello"), []byte("world"))
+// digest = SHA256("helloworld")
+```
+
+### HashIndexLengthPrefixed
+
+Hashes inputs after encoding each with its index and length prefix. This ensures different input sequences produce distinct outputs.
+
+```go
+func HashIndexLengthPrefixed[H hash.Hash](hashFunc func() H, xs ...[]byte) ([]byte, error)
+```
+
+**Why use this?**
+- Prevents collision attacks from input concatenation
+- `Hash("abc", "def") ≠ Hash("ab", "cdef")`
+- Recommended for protocol contexts with variable-length inputs
+
+**Example:**
+
+```go
+digest, err := hashing.HashIndexLengthPrefixed(
+    sha256.New,
+    []byte("message1"),
+    []byte("message2"),
+)
+// Encodes as: index0 || len(message1) || message1 || index1 || len(message2) || message2
+```
+
+### HashChain
+
+Computes an iterated hash where each input is hashed with the previous output: `H(H(...H(H(0 || x₁) || x₂)...) || xₙ)`
+
+```go
+func HashChain[H hash.Hash](hashFunc func() H, xs ...[]byte) ([]byte, error)
+```
+
+**Use cases:**
+- Hash chains for commitment schemes
+- Merkle-Damgård construction
+- One-time signature schemes
+
+**Example:**
+
+```go
+import "golang.org/x/crypto/blake2b"
+
+digest, err := hashing.HashChain(
+    blake2b.New256,
+    []byte("a"),
+    []byte("b"),
+    []byte("c"),
+)
+// Computes: h3 = H(H(H(0 || "a") || "b") || "c")
+```
+
+---
+
+## HMAC Functions
+
+### Hmac
+
+Computes HMAC (keyed hash) over inputs.
+
+```go
+func Hmac[H hash.Hash](key []byte, hashFunc func() H, xs ...[]byte) ([]byte, error)
+```
+
+<ParamField path="key" type="[]byte" required>
+  Secret key for HMAC
+</ParamField>
+
+<ParamField path="hashFunc" type="func() H" required>
+  Underlying hash function
+</ParamField>
+
+<ParamField path="xs" type="...[]byte">
+  Messages to authenticate
+</ParamField>
+
+**Example:**
+
+```go
+import "crypto/sha512"
+
+key := []byte("secret-key")
+tag, err := hashing.Hmac(
+    key,
+    sha512.New,
+    []byte("authenticated data"),
+)
+```
+
+### HmacIndexLengthPrefixed
+
+HMAC with index-length prefixed encoding:
+
+```go
+tag, err := hashing.HmacIndexLengthPrefixed(
+    key,
+    sha256.New,
+    []byte("msg1"),
+    []byte("msg2"),
+)
+```
+
+---
+
+## KMAC (Keccak MAC)
+
+KMAC provides authenticated encryption based on the Keccak (SHA-3) sponge construction. Defined in NIST SP 800-185.
+
+### Kmac
+
+Computes KMAC over inputs with customization string.
+
+```go
+func Kmac(
+    key, customizationString []byte,
+    tagSize int,
+    h func(key []byte, tagSize int, customizationString []byte) (*kmac.Kmac, error),
+    xs ...[]byte,
+) ([]byte, error)
+```
+
+<ParamField path="key" type="[]byte" required>
+  Secret key (must be at least tagSize/2 bytes)
+</ParamField>
+
+<ParamField path="customizationString" type="[]byte">
+  Domain separation / application identifier
+</ParamField>
+
+<ParamField path="tagSize" type="int" required>
+  Output length in bytes
+</ParamField>
+
+<ParamField path="h" type="func(...)" required>
+  KMAC constructor (e.g., `kmac.NewKMAC128` or `kmac.NewKMAC256`)
+</ParamField>
+
+**Example:**
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/hashing/kmac"
+
+key := make([]byte, 32)  // 256-bit key
+io.ReadFull(rand.Reader, key)
+
+tag, err := hashing.Kmac(
+    key,
+    []byte("MyApp-v1.0"),  // Customization
+    32,                     // 256-bit output
+    kmac.NewKMAC256,
+    []byte("data to authenticate"),
+)
+```
+
+### KmacIndexLengthPrefixed
+
+KMAC with collision-resistant input encoding:
+
+```go
+tag, err := hashing.KmacIndexLengthPrefixed(
+    key,
+    []byte("protocol-name"),
+    64,  // 512-bit output
+    kmac.NewKMAC256,
+    input1,
+    input2,
+)
+```
+
+### Security Notes
+
+- **Key Length**: Must be at least `tagSize/2` bytes for claimed security level
+- **128-bit security**: Use KMAC256 with 32+ byte key and 32+ byte output
+- **256-bit security**: Use KMAC256 with 64+ byte key and 64+ byte output
+- **Customization**: Use unique strings per application/protocol
+
+---
+
+## BIP-340 Tagged Hashing
+
+BIP-340 defines tagged hashing for Bitcoin Schnorr signatures to prevent cross-protocol attacks.
+
+### Location
+
+Source: `~/workspace/source/pkg/hashing/bip340/bip340.go:1`
+
+### TaggedHash
+
+Computes `SHA256(SHA256(tag) || SHA256(tag) || data)`
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/hashing/bip340"
+
+digest := bip340.TaggedHash("BIP0340/challenge", data)
+```
+
+<ParamField path="tag" type="string" required>
+  Domain separation tag
+</ParamField>
+
+<ParamField path="data" type="[]byte" required>
+  Data to hash
+</ParamField>
+
+**Standard BIP-340 Tags:**
+
+- `"BIP0340/challenge"` - Challenge hash in signature
+- `"BIP0340/aux"` - Auxiliary random data
+- `"BIP0340/nonce"` - Nonce generation
+
+**Example:**
+
+```go
+// Compute challenge for Schnorr signature
+challenge := bip340.TaggedHash(
+    "BIP0340/challenge",
+    append(append(R.Bytes(), P.Bytes()...), message...),
+)
+```
+
+---
+
+## Poseidon Hash
+
+Poseidon is an algebraic hash function optimized for zero-knowledge proofs and SNARKs.
+
+### Features
+
+- **ZK-Friendly**: Efficient in algebraic circuits (R1CS, PLONK)
+- **Field Native**: Operates on field elements directly
+- **Sponge Construction**: Based on permutation function
+- **Configurable**: Supports different security levels and field sizes
+
+### Location
+
+Source: `~/workspace/source/pkg/hashing/poseidon/poseidon.go:1`
+
+### NewPoseidon
+
+Creates a Poseidon hasher for a specific prime field.
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/base/algebra"
+    "github.com/bronlabs/bron-crypto/pkg/hashing/poseidon"
+)
+
+field := // ... prime field implementation
+hasher, err := poseidon.NewPoseidon(field, rate, capacity)
+```
+
+<ParamField path="field" type="algebra.PrimeField">
+  Prime field for arithmetic operations
+</ParamField>
+
+<ParamField path="rate" type="int">
+  Number of field elements absorbed per permutation
+</ParamField>
+
+<ParamField path="capacity" type="int">
+  Security parameter (capacity = rate + security_level)
+</ParamField>
+
+**Example:**
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/base/curves/bn254"
+
+field := bn254.NewScalarField()
+
+// Standard configuration for ~128-bit security
+hasher, err := poseidon.NewPoseidon(field, 2, 1)
+
+// Hash field elements
+input1 := field.FromUint64(123)
+input2 := field.FromUint64(456)
+
+hasher.Write(input1)
+hasher.Write(input2)
+digest := hasher.Sum()
+```
+
+---
+
+## Utility Functions
+
+### HashFuncTypeErase
+
+Converts generic hash constructor to `func() hash.Hash`:
+
+```go
+import "golang.org/x/crypto/sha3"
+
+// Convert SHA3-256 to generic hash.Hash
+genericHash := hashing.HashFuncTypeErase(sha3.New256)
+
+// Now can be used with crypto/hmac
+import "crypto/hmac"
+mac := hmac.New(genericHash, key)
+```
+
+---
+
+## Hash Function Selection
+
+| Hash Function | Output Size | Speed | Use Case |
+|---------------|-------------|-------|----------|
+| SHA-256 | 32 bytes | Fast | General purpose, Bitcoin |
+| SHA-512 | 64 bytes | Fast (64-bit) | High security, Ed25519 |
+| BLAKE2b-256 | 32 bytes | Very fast | General purpose, modern |
+| BLAKE2b-512 | 64 bytes | Very fast | High security, Zcash |
+| KMAC256 | Variable | Fast | MAC, key derivation |
+| Poseidon | Field element | Slow (native), Fast (ZK) | Zero-knowledge proofs |
+
+## Complete Examples
+
+### Building a Merkle Tree
+
+```go
+package main
+
+import (
+    "crypto/sha256"
+    "github.com/bronlabs/bron-crypto/pkg/hashing"
+)
+
+func merkleRoot(leaves [][]byte) ([]byte, error) {
+    if len(leaves) == 0 {
+        return nil, fmt.Errorf("no leaves")
+    }
+    
+    // Hash all leaves
+    level := make([][]byte, len(leaves))
+    for i, leaf := range leaves {
+        level[i], _ = hashing.Hash(sha256.New, leaf)
+    }
+    
+    // Build tree bottom-up
+    for len(level) > 1 {
+        nextLevel := make([][]byte, (len(level)+1)/2)
+        for i := 0; i < len(level); i += 2 {
+            if i+1 < len(level) {
+                nextLevel[i/2], _ = hashing.Hash(sha256.New, level[i], level[i+1])
+            } else {
+                nextLevel[i/2] = level[i]
+            }
+        }
+        level = nextLevel
+    }
+    
+    return level[0], nil
+}
+```
+
+### Key Derivation Function
+
+```go
+package main
+
+import (
+    "golang.org/x/crypto/blake2b"
+    "github.com/bronlabs/bron-crypto/pkg/hashing"
+)
+
+func deriveKey(masterKey, context []byte, keyID uint32) ([]byte, error) {
+    keyIDBytes := make([]byte, 4)
+    binary.BigEndian.PutUint32(keyIDBytes, keyID)
+    
+    return hashing.Hmac(
+        masterKey,
+        blake2b.New256,
+        context,
+        keyIDBytes,
+    )
+}
+
+// Usage
+masterKey := []byte("master-secret-key")
+encryptionKey, _ := deriveKey(masterKey, []byte("encryption"), 1)
+authKey, _ := deriveKey(masterKey, []byte("authentication"), 2)
+```
+
+### Commitment Scheme
+
+```go
+package main
+
+import (
+    "crypto/rand"
+    "io"
+    "golang.org/x/crypto/blake2b"
+    "github.com/bronlabs/bron-crypto/pkg/hashing"
+)
+
+func commit(secret []byte) (commitment, nonce []byte, err error) {
+    nonce = make([]byte, 32)
+    if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
+        return nil, nil, err
+    }
+    
+    commitment, err = hashing.Hash(
+        blake2b.New256,
+        nonce,
+        secret,
+    )
+    return commitment, nonce, err
+}
+
+func verify(commitment, secret, nonce []byte) bool {
+    recomputed, _ := hashing.Hash(blake2b.New256, nonce, secret)
+    return bytes.Equal(commitment, recomputed)
+}
+```
+
+## Performance Benchmarks
+
+Approximate throughput on modern CPUs:
+
+| Function | Throughput | Notes |
+|----------|------------|-------|
+| SHA-256 | ~500 MB/s | Hardware acceleration |
+| SHA-512 | ~800 MB/s | Faster on 64-bit CPUs |
+| BLAKE2b | ~1 GB/s | Optimized implementation |
+| KMAC256 | ~400 MB/s | Keccak permutation |
+| Poseidon | ~10 KB/s | Native (slow), ~1 GB/s in circuits |
+
+## Security Considerations
+
+### General
+
+- **Collision Resistance**: Use at least 256-bit output for long-term security
+- **Preimage Resistance**: All functions provide second preimage resistance
+- **Domain Separation**: Always use distinct contexts for different protocols
+
+### Index-Length Prefixing
+
+- **When to use**: Any protocol with variable-length inputs
+- **Why**: Prevents `Hash("ab", "c") = Hash("a", "bc")` collisions
+- **Overhead**: ~8 bytes per input (index + length)
+
+### KMAC
+
+- **Key Management**: Keys must be random and kept secret
+- **Customization**: Use unique strings per application
+- **Key Reuse**: Safe to use same key for multiple operations
+
+## Related
+
+- [Commitments](/api/primitives/commitments) - Using hashes for commitments
+- [Signatures](/api/primitives/signatures) - Hash functions in signature schemes
+- [Encryption](/api/primitives/encryption) - Key derivation for encryption

@@ -1,0 +1,526 @@
+---
+title: "Testing"
+description: "Testing strategies and best practices for Bron Crypto"
+---
+
+## Test Types
+
+Bron Crypto uses a comprehensive testing strategy:
+
+<CardGroup cols={3}>
+  <Card title="Unit Tests" icon="flask">
+    Functional correctness of individual components
+  </Card>
+  <Card title="Property Tests" icon="dice">
+    Randomized invariant testing using `pgregory.net/rapid`
+  </Card>
+  <Card title="Benchmarks" icon="gauge">
+    Performance measurement and regression detection
+  </Card>
+</CardGroup>
+
+## Quick Commands
+
+Run the test suite with these commands:
+
+<CodeGroup>
+```bash All Tests
+make test
+```
+
+```bash Race Detection
+make test-race
+```
+
+```bash Benchmarks
+make bench
+```
+
+```bash Coverage Report
+make coverage
+```
+</CodeGroup>
+
+<Info>
+  All test targets automatically build BoringSSL and inject required CGO flags.
+</Info>
+
+## Running Tests
+
+### Full Test Suite
+
+Run all tests across all packages:
+
+```bash
+make test
+```
+
+This executes:
+```bash
+CGO_CFLAGS="-I.../thirdparty/boringssl/include" \
+CGO_LDFLAGS="-L.../thirdparty/boringssl/build -lcrypto" \
+go test ./...
+```
+
+### Package-Specific Tests
+
+Test a specific package or subtree:
+
+```bash
+CGO_CFLAGS="-I$(pwd)/thirdparty/boringssl/include" \
+CGO_LDFLAGS="-L$(pwd)/thirdparty/boringssl/build -lcrypto" \
+go test ./pkg/mpc/tsig/tschnorr/...
+```
+
+<Note>
+  You must manually set CGO flags when using `go test` directly instead of `make test`.
+</Note>
+
+### Verbose Output
+
+See detailed test output:
+
+```bash
+make test GOFLAGS=-v
+```
+
+Or directly:
+```bash
+CGO_CFLAGS="-I$(pwd)/thirdparty/boringssl/include" \
+CGO_LDFLAGS="-L$(pwd)/thirdparty/boringssl/build -lcrypto" \
+go test -v ./pkg/...
+```
+
+### Run Specific Tests
+
+Run tests matching a pattern:
+
+```bash
+CGO_CFLAGS="-I$(pwd)/thirdparty/boringssl/include" \
+CGO_LDFLAGS="-L$(pwd)/thirdparty/boringssl/build -lcrypto" \
+go test ./pkg/mpc/tsig/tschnorr/... -run TestLindell22DKGAndSign
+```
+
+## Race Detection
+
+<Warning>
+  Always run tests with race detection enabled when developing concurrent code.
+</Warning>
+
+Detect data races:
+
+```bash
+make test-race
+```
+
+This runs all tests with Go's race detector enabled:
+```bash
+go test -race ./...
+```
+
+Race detection catches:
+- Concurrent access to shared memory
+- Missing synchronization
+- Goroutine leaks
+
+## Benchmarks
+
+### Run All Benchmarks
+
+```bash
+make bench
+```
+
+This runs:
+```bash
+go test ./... -bench=. -run=^$
+```
+
+<Info>
+  The `-run=^$` flag ensures only benchmarks run (no unit tests).
+</Info>
+
+### Package-Specific Benchmarks
+
+Benchmark a specific package:
+
+```bash
+CGO_CFLAGS="-I$(pwd)/thirdparty/boringssl/include" \
+CGO_LDFLAGS="-L$(pwd)/thirdparty/boringssl/build -lcrypto" \
+go test ./pkg/mpc/tsig/tschnorr/... -bench=. -run=^$
+```
+
+### Benchmark Options
+
+<CodeGroup>
+```bash Memory Allocation
+go test -bench=. -benchmem -run=^$
+```
+
+```bash CPU Profiling
+go test -bench=. -cpuprofile=cpu.prof -run=^$
+```
+
+```bash Memory Profiling
+go test -bench=. -memprofile=mem.prof -run=^$
+```
+
+```bash Longer Benchmarks
+go test -bench=. -benchtime=10s -run=^$
+```
+</CodeGroup>
+
+### Analyze Profiles
+
+Visualize CPU profile:
+```bash
+go tool pprof cpu.prof
+```
+
+Visualize memory profile:
+```bash
+go tool pprof mem.prof
+```
+
+## Coverage
+
+### Generate Coverage Report
+
+```bash
+make coverage
+```
+
+This creates `coverage.out` in the repository root.
+
+### View Coverage Report
+
+<Steps>
+  <Step title="Generate HTML report">
+    ```bash
+    go tool cover -html=coverage.out -o coverage.html
+    ```
+  </Step>
+  
+  <Step title="Open in browser">
+    ```bash
+    open coverage.html  # macOS
+    xdg-open coverage.html  # Linux
+    ```
+  </Step>
+</Steps>
+
+### Coverage by Package
+
+```bash
+go tool cover -func=coverage.out
+```
+
+Output:
+```
+github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22/signing/cosigner.go:45:    NewCosigner         91.7%
+github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22/signing/cosigner.go:89:    Round1              100.0%
+github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22/signing/cosigner.go:103:   Round2              95.8%
+...
+```
+
+## Property-Based Testing
+
+Bron Crypto uses [`pgregory.net/rapid`](https://pkg.go.dev/pgregory.net/rapid) for property-based testing.
+
+### Example Property Test
+
+```go
+func TestScalarMultiplication(t *testing.T) {
+    rapid.Check(t, func(t *rapid.T) {
+        // Generate random scalar
+        scalar := rapid.Uint64().Draw(t, "scalar")
+        
+        // Property: G * a * b == G * b * a
+        group := k256.NewCurve()
+        g := group.Generator()
+        
+        result1 := g.Mul(scalar).Mul(scalar)
+        result2 := g.Mul(scalar * scalar)
+        
+        if !result1.Equal(result2) {
+            t.Fatalf("multiplication not commutative")
+        }
+    })
+}
+```
+
+### Running Property Tests
+
+Property tests run like normal tests:
+
+```bash
+make test
+```
+
+Increase the number of test cases:
+```bash
+go test -rapid.checks=10000 ./...
+```
+
+## Test Organization
+
+### Test File Naming
+
+- Unit tests: `*_test.go`
+- Benchmarks: `*_test.go` (with `Benchmark*` functions)
+- Test utilities: `testutils/` subdirectories
+
+### Example Test Structure
+
+```go
+package signing_test
+
+import (
+    "testing"
+    "github.com/stretchr/testify/require"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22/signing"
+)
+
+func TestRound1(t *testing.T) {
+    t.Parallel()  // Enable parallel execution
+    
+    // Setup
+    cosigner := setupCosigner(t)
+    
+    // Execute
+    output, err := cosigner.Round1()
+    
+    // Assert
+    require.NoError(t, err)
+    require.NotNil(t, output)
+}
+
+func BenchmarkRound1(b *testing.B) {
+    cosigner := setupCosigner(&testing.T{})
+    
+    b.ResetTimer()
+    for i := 0; i < b.N; i++ {
+        cosigner.Round1()
+    }
+}
+```
+
+## Test Utilities
+
+Bron Crypto provides test utilities in `testutils/` packages:
+
+<AccordionGroup>
+  <Accordion title="Session Test Utils" icon="network-wired">
+    **Location**: `pkg/mpc/session/testutils`
+    
+    Helper functions for creating test sessions and contexts:
+    ```go
+    import "github.com/bronlabs/bron-crypto/pkg/mpc/session/testutils"
+    
+    ctxs := testutils.MakeRandomContexts(t, shareholders, prng)
+    ```
+  </Accordion>
+  
+  <Accordion title="Network Test Utils" icon="share-nodes">
+    **Location**: `pkg/network/testutils`
+    
+    Utilities for simulating network communication:
+    ```go
+    import ntu "github.com/bronlabs/bron-crypto/pkg/network/testutils"
+    
+    inputs := ntu.MapBroadcastO2I(t, participants, outputs)
+    ```
+  </Accordion>
+  
+  <Accordion title="Lindell22 Test Utils" icon="key">
+    **Location**: `pkg/mpc/tsig/tschnorr/lindell22/testutils`
+    
+    Helpers for Lindell22 protocol testing:
+    ```go
+    import ltu "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22/testutils"
+    
+    shards := ltu.DoLindell22DKG(t, parties)
+    cosigners := ltu.CreateLindell22Cosigners(t, ctxs, shards, variant, prng)
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Docker-Based Testing
+
+Run tests in an isolated Docker environment:
+
+```bash
+./run-in-docker.sh make test
+./run-in-docker.sh make test-race
+./run-in-docker.sh make bench
+```
+
+Benefits:
+- Reproducible environment
+- No host pollution
+- Matches CI/CD setup
+
+## CI/CD Integration
+
+Example GitHub Actions workflow:
+
+```yaml .github/workflows/test.yml
+name: Test
+
+on: [push, pull_request]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build
+      
+      - name: Run tests
+        run: make test
+      
+      - name: Run race detector
+        run: make test-race
+      
+      - name: Generate coverage
+        run: make coverage
+      
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: ./coverage.out
+```
+
+## Best Practices
+
+<CardGroup cols={2}>
+  <Card title="Parallel Tests" icon="arrows-split-up-and-left">
+    Use `t.Parallel()` to run tests concurrently:
+    ```go
+    func TestSomething(t *testing.T) {
+        t.Parallel()
+        // test code
+    }
+    ```
+  </Card>
+  
+  <Card title="Table-Driven Tests" icon="table">
+    Use test tables for multiple cases:
+    ```go
+    testCases := []struct {
+        name string
+        input int
+        want int
+    }{
+        {"zero", 0, 0},
+        {"positive", 5, 10},
+    }
+    ```
+  </Card>
+  
+  <Card title="Subtests" icon="sitemap">
+    Organize related tests:
+    ```go
+    t.Run("Round1", func(t *testing.T) {
+        // test round 1
+    })
+    ```
+  </Card>
+  
+  <Card title="Test Fixtures" icon="box">
+    Use helper functions for setup:
+    ```go
+    func setupCosigner(t *testing.T) *Cosigner {
+        t.Helper()
+        // setup code
+    }
+    ```
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="CGO linking errors in tests" icon="triangle-exclamation">
+    **Error**: `undefined reference to 'CRYPTO_...'`
+    
+    **Solution**: Ensure CGO flags are set:
+    ```bash
+    export CGO_CFLAGS="-I$(pwd)/thirdparty/boringssl/include"
+    export CGO_LDFLAGS="-L$(pwd)/thirdparty/boringssl/build -lcrypto"
+    ```
+  </Accordion>
+  
+  <Accordion title="Race detector false positives" icon="triangle-exclamation">
+    **Issue**: Race detector reports false positives
+    
+    **Solution**: Use `//go:norace` annotation (use sparingly):
+    ```go
+    //go:norace
+    func TestSomething(t *testing.T) {
+        // test code
+    }
+    ```
+  </Accordion>
+  
+  <Accordion title="Tests timeout" icon="triangle-exclamation">
+    **Error**: `panic: test timed out after 10m0s`
+    
+    **Solution**: Increase timeout:
+    ```bash
+    go test -timeout 30m ./...
+    ```
+  </Accordion>
+  
+  <Accordion title="Flaky property tests" icon="triangle-exclamation">
+    **Issue**: Property tests fail non-deterministically
+    
+    **Solution**: Use a fixed seed for reproducibility:
+    ```go
+    rapid.Check(t, func(t *rapid.T) {
+        // test code
+    }, rapid.Seed(12345))
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Test Coverage Goals
+
+<Note>
+  Critical cryptographic code should have >90% coverage. MPC protocols and signing should have comprehensive test coverage.
+</Note>
+
+Priority areas:
+- Threshold signature protocols (tschnorr, tecdsa, tbls)
+- DKG implementations
+- Zero-knowledge proofs
+- Cryptographic primitives
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Development Setup" icon="code" href="/setup/development">
+    Set up your development environment
+  </Card>
+  
+  <Card title="Building" icon="hammer" href="/setup/building">
+    Learn about build configurations
+  </Card>
+  
+  <Card title="Contributing" icon="code-pull-request" href="/guides/contributing">
+    Guidelines for contributing code
+  </Card>
+  
+  <Card title="Security" icon="shield" href="/guides/security-best-practices">
+    Security best practices
+  </Card>
+</CardGroup>

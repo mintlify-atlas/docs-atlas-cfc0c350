@@ -1,0 +1,686 @@
+---
+title: 'Networking & Message Routing'
+description: 'Guide to coordinating multi-party protocols with network primitives'
+---
+
+## Overview
+
+Bron Crypto provides transport-agnostic networking primitives for coordinating multi-party protocols. The `pkg/network` package handles message routing, correlation IDs, buffering, and quorum management while remaining independent of the underlying transport layer.
+
+<Note>
+The networking layer is **transport-agnostic** - you provide a `Delivery` implementation for your specific transport (TCP, HTTP, libp2p, etc.) and the library handles protocol coordination.
+</Note>
+
+## Core Components
+
+### Session IDs
+
+Session identifiers (SIDs) provide protocol scoping:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/network"
+
+// Create a session ID from arbitrary inputs
+sid := network.NewSID(
+    []byte("protocol-name"),
+    []byte("timestamp"),
+    publicKeys,
+)
+
+// SID is a 32-byte hash (SHA3-256)
+fmt.Printf("Session: %x\n", sid)
+```
+
+### The Delivery Interface
+
+Implement this interface to connect your transport:
+
+```go
+type Delivery interface {
+    PartyID() sharing.ID          // Local party identifier  
+    Quorum() []sharing.ID         // All parties in session
+    Send(to sharing.ID, message []byte) error
+    Receive() (from sharing.ID, message []byte, err error)
+}
+```
+
+<Steps>
+
+<Step title="Define Your Transport">
+
+Implement the `Delivery` interface for your networking layer:
+
+```go
+package mytransport
+
+import (
+    "net"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/sharing"
+)
+
+type TCPDelivery struct {
+    localID     sharing.ID
+    quorum      []sharing.ID
+    connections map[sharing.ID]net.Conn
+    incoming    chan message
+}
+
+type message struct {
+    from    sharing.ID
+    payload []byte
+}
+
+func NewTCPDelivery(localID sharing.ID, quorum []sharing.ID, addrs map[sharing.ID]string) (*TCPDelivery, error) {
+    d := &TCPDelivery{
+        localID:     localID,
+        quorum:      quorum,
+        connections: make(map[sharing.ID]net.Conn),
+        incoming:    make(chan message, 100),
+    }
+    
+    // Establish connections to other parties
+    for id, addr := range addrs {
+        if id == localID {
+            continue
+        }
+        conn, err := net.Dial("tcp", addr)
+        if err != nil {
+            return nil, err
+        }
+        d.connections[id] = conn
+        
+        // Start receiving goroutine
+        go d.receiveLoop(id, conn)
+    }
+    
+    return d, nil
+}
+
+func (d *TCPDelivery) PartyID() sharing.ID {
+    return d.localID
+}
+
+func (d *TCPDelivery) Quorum() []sharing.ID {
+    return d.quorum
+}
+
+func (d *TCPDelivery) Send(to sharing.ID, message []byte) error {
+    conn, ok := d.connections[to]
+    if !ok {
+        return fmt.Errorf("no connection to party %v", to)
+    }
+    
+    // Send length prefix + message
+    length := uint32(len(message))
+    if err := binary.Write(conn, binary.BigEndian, length); err != nil {
+        return err
+    }
+    _, err := conn.Write(message)
+    return err
+}
+
+func (d *TCPDelivery) Receive() (from sharing.ID, message []byte, err error) {
+    msg := <-d.incoming
+    return msg.from, msg.payload, nil
+}
+
+func (d *TCPDelivery) receiveLoop(id sharing.ID, conn net.Conn) {
+    for {
+        var length uint32
+        if err := binary.Read(conn, binary.BigEndian, &length); err != nil {
+            return
+        }
+        
+        payload := make([]byte, length)
+        if _, err := io.ReadFull(conn, payload); err != nil {
+            return
+        }
+        
+        d.incoming <- message{from: id, payload: payload}
+    }
+}
+```
+
+</Step>
+
+<Step title="Create a Router">
+
+Wrap your delivery with a `Router` for correlation-aware routing:
+
+```go
+delivery := NewTCPDelivery(myID, quorum, addresses)
+router := network.NewRouter(delivery)
+
+// Router adds:
+// - Correlation IDs for concurrent protocol execution
+// - Message buffering for out-of-order delivery
+// - Automatic serialization/deserialization
+```
+
+</Step>
+
+<Step title="Exchange Messages">
+
+Use the router to send and receive with correlation IDs:
+
+```go
+// Send messages to specific parties
+messages := map[sharing.ID][]byte{
+    sharing.ID(1): payload1,
+    sharing.ID(2): payload2,
+}
+err := router.SendTo("round1", messages)
+
+// Receive from specific parties
+responses, err := router.ReceiveFrom("round1", sharing.ID(1), sharing.ID(2))
+```
+
+</Step>
+
+</Steps>
+
+## Message Patterns
+
+### Unicast Messages
+
+Send different messages to different parties:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/network"
+    "github.com/bronlabs/bron-crypto/pkg/base/datastructures/hashmap"
+)
+
+// Create message map
+messages := hashmap.NewComparable[sharing.ID, *MyMessage]()
+for id := range quorum.Iter() {
+    if id == router.PartyID() {
+        continue
+    }
+    messages.Put(id, &MyMessage{
+        Data: computeDataFor(id),
+    })
+}
+
+// Send unicast
+err := network.SendUnicast(router, "round1", messages.Freeze())
+
+// Receive unicast responses  
+responses, err := network.ReceiveUnicast[*MyResponse](router, "round1", quorum)
+```
+
+### Broadcast Messages
+
+Send the same message to all parties:
+
+```go
+// Broadcast helper
+func BroadcastMessage[M any](quorum Quorum, msg M) OutgoingBroadcast[M] {
+    messages := hashmap.NewComparable[sharing.ID, M]()
+    for id := range quorum.Iter() {
+        messages.Put(id, msg)
+    }
+    return messages.Freeze()
+}
+
+// Use in protocol
+broadcast := BroadcastMessage(quorum, &MyMessage{Data: "same for all"})
+err := network.SendUnicast(router, "broadcast1", broadcast)
+```
+
+### Echo Broadcast
+
+For Byzantine fault tolerance, use the echo broadcast primitive:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/network/echo"
+
+// Create echo broadcast participant
+participant, err := echo.NewParticipant[MyPayload](myID, quorum)
+if err != nil {
+    panic(err)
+}
+
+// Round 1: Send payload
+myPayload := MyPayload{Data: "important message"}
+r1Out, err := participant.Round1(myPayload)
+if err != nil {
+    panic(err)
+}
+
+// Exchange round 1 messages with all parties
+// (using your network coordinator)
+
+// Round 2: Echo all received payloads
+r2Out, err := participant.Round2(r1In)
+if err != nil {
+    panic(err)
+}
+
+// Exchange round 2 messages
+
+// Round 3: Validate consistency
+agreedPayloads, err := participant.Round3(r2In)
+if err != nil {
+    // Inconsistency detected - abort protocol
+    panic(err)
+}
+
+// All honest parties now have the same payloads
+```
+
+<Accordion title="How Echo Broadcast Works">
+
+The echo broadcast protocol ensures all honest parties receive the same messages through three rounds:
+
+1. **Round 1**: Each party unicasts its message to everyone
+2. **Round 2**: Parties echo every payload they observed back to all others
+3. **Round 3**: Parties check that all echoes match; mismatches cause abort
+
+**Properties:**
+- Detects inconsistencies if Byzantine parties send different messages
+- Requires O(n²) communication
+- Suitable for small groups (n < 20)
+- CBOR-encoded payloads for type safety
+
+**Security:** If t < n/3 parties are malicious, all honest parties will either agree on the same messages or abort.
+
+</Accordion>
+
+## Correlation IDs
+
+Correlation IDs enable concurrent protocol execution on the same transport:
+
+```go
+// Run multiple signing sessions concurrently
+var wg sync.WaitGroup
+
+for i := range 5 {
+    wg.Add(1)
+    go func(sessionID int) {
+        defer wg.Done()
+        
+        // Each session uses unique correlation ID
+        corrID := fmt.Sprintf("sign-session-%d", sessionID)
+        
+        // Round 1
+        err := router.SendTo(corrID+"-r1", round1Messages)
+        responses, err := router.ReceiveFrom(corrID+"-r1", parties...)
+        
+        // Round 2
+        err = router.SendTo(corrID+"-r2", round2Messages)
+        responses, err = router.ReceiveFrom(corrID+"-r2", parties...)
+    }(i)
+}
+
+wg.Wait()
+```
+
+<Note>
+**Router Buffering**: The router automatically buffers messages with different correlation IDs, so out-of-order delivery doesn't cause issues.
+</Note>
+
+## Testing with Mock Networks
+
+The library provides in-memory test utilities:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/network/testutils"
+
+func TestProtocol(t *testing.T) {
+    // Create in-memory coordinator
+    coordinator := testutils.NewMockCoordinator()
+    
+    // Add parties
+    party1 := coordinator.AddParty(sharing.ID(1))
+    party2 := coordinator.AddParty(sharing.ID(2))
+    party3 := coordinator.AddParty(sharing.ID(3))
+    
+    // Create routers
+    router1 := network.NewRouter(party1)
+    router2 := network.NewRouter(party2)
+    router3 := network.NewRouter(party3)
+    
+    // Run protocol with simulated network
+    // Messages are delivered in-memory instantly
+}
+```
+
+### Helper Functions
+
+The `testutils` package provides mapping helpers:
+
+```go
+// Convert broadcast outputs to inputs
+type HasSharingID interface {
+    SharingID() sharing.ID
+}
+
+func MapBroadcastO2I[M any, P HasSharingID](
+    t *testing.T,
+    participants []P,
+    outputs map[sharing.ID]network.OutgoingBroadcast[M],
+) map[sharing.ID]network.RoundMessages[M] {
+    inputs := make(map[sharing.ID]network.RoundMessages[M])
+    
+    for _, recipient := range participants {
+        recipientID := recipient.SharingID()
+        messages := hashmap.NewComparable[sharing.ID, M]()
+        
+        for senderID, broadcast := range outputs {
+            if senderID == recipientID {
+                continue
+            }
+            msg, ok := broadcast.Get(senderID)
+            require.True(t, ok)
+            messages.Put(senderID, msg)
+        }
+        
+        inputs[recipientID] = messages.Freeze()
+    }
+    
+    return inputs
+}
+
+// Usage in tests
+r1Outputs := make(map[sharing.ID]network.OutgoingBroadcast[*Round1Msg])
+for _, p := range participants {
+    r1Outputs[p.SharingID()], err = p.Round1()
+    require.NoError(t, err)
+}
+
+r2Inputs := MapBroadcastO2I(t, participants, r1Outputs)
+```
+
+## Advanced Patterns
+
+### Runner Interface
+
+Protocols can implement the `Runner` interface for orchestration:
+
+```go
+type Runner interface {
+    Run(rt *Router) error
+}
+
+// Example implementation
+type MyProtocol struct {
+    input []byte
+}
+
+func (p *MyProtocol) Run(router *network.Router) error {
+    // Round 1
+    r1Msg := &Round1Message{Data: p.input}
+    if err := router.SendTo("r1", broadcastMap(router.Quorum(), r1Msg)); err != nil {
+        return err
+    }
+    
+    r1Responses, err := router.ReceiveFrom("r1", otherParties(router)...)
+    if err != nil {
+        return err
+    }
+    
+    // Round 2
+    r2Msg := processRound1(r1Responses)
+    if err := router.SendTo("r2", broadcastMap(router.Quorum(), r2Msg)); err != nil {
+        return err
+    }
+    
+    // Continue...
+    return nil
+}
+
+// Execute protocol
+protocol := &MyProtocol{input: data}
+if err := protocol.Run(router); err != nil {
+    log.Fatal(err)
+}
+```
+
+### Exchange Helpers
+
+Simplify request-response patterns:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/network/exchange"
+
+// Combined broadcast + unicast exchange
+type Round1Broadcast struct {
+    Commitment []byte
+}
+
+type Round1Unicast struct {
+    Share []byte
+}
+
+participant := exchange.NewParticipant[*Round1Broadcast, *Round1Unicast](
+    router,
+    "round1",
+)
+
+// Send broadcast and unicasts simultaneously
+broadcast := &Round1Broadcast{Commitment: commitment}
+unicasts := makeUnicasts(shares)
+
+receivedBroadcasts, receivedUnicasts, err := participant.Exchange(broadcast, unicasts)
+if err != nil {
+    panic(err)
+}
+```
+
+## Protocol Coordination Patterns
+
+### Sequential Rounds
+
+```go
+// Standard sequential round execution
+func RunProtocol(router *network.Router, parties []sharing.ID) error {
+    // Round 1
+    r1Out := computeRound1()
+    if err := router.SendTo("r1", r1Out); err != nil {
+        return err
+    }
+    r1In, err := router.ReceiveFrom("r1", parties...)
+    if err != nil {
+        return err
+    }
+    
+    // Round 2 (depends on Round 1)
+    r2Out := computeRound2(r1In)
+    if err := router.SendTo("r2", r2Out); err != nil {
+        return err
+    }
+    r2In, err := router.ReceiveFrom("r2", parties...)
+    if err != nil {
+        return err
+    }
+    
+    return nil
+}
+```
+
+### Parallel Rounds
+
+Some protocols allow parallelization:
+
+```go
+// Run independent protocol branches in parallel
+var wg sync.WaitGroup
+errors := make(chan error, 2)
+
+wg.Add(2)
+
+// Branch 1
+go func() {
+    defer wg.Done()
+    if err := runBranch1(router); err != nil {
+        errors <- err
+    }
+}()
+
+// Branch 2 
+go func() {
+    defer wg.Done()
+    if err := runBranch2(router); err != nil {
+        errors <- err
+    }
+}()
+
+wg.Wait()
+close(errors)
+
+for err := range errors {
+    if err != nil {
+        return err
+    }
+}
+```
+
+### Timeout Handling
+
+```go
+import "time"
+
+func ReceiveWithTimeout(
+    router *network.Router,
+    corrID string,
+    parties []sharing.ID,
+    timeout time.Duration,
+) (map[sharing.ID][]byte, error) {
+    type result struct {
+        messages map[sharing.ID][]byte
+        err      error
+    }
+    
+    done := make(chan result, 1)
+    
+    go func() {
+        messages, err := router.ReceiveFrom(corrID, parties...)
+        done <- result{messages, err}
+    }()
+    
+    select {
+    case res := <-done:
+        return res.messages, res.err
+    case <-time.After(timeout):
+        return nil, fmt.Errorf("timeout waiting for messages")
+    }
+}
+```
+
+## Performance Considerations
+
+### Communication Complexity
+
+| Pattern | Messages | Bandwidth | Best For |
+|---------|----------|-----------|----------|
+| Unicast (point-to-point) | n | O(n) | Different messages per party |
+| Broadcast (via unicast) | n | O(n) | Same message to all |
+| Echo Broadcast | 3n² | O(n²) | Byzantine fault tolerance |
+| Star topology | 2n | O(n) | Coordinator-based protocols |
+
+<Tip>
+**Optimization Tips:**
+
+1. **Batch messages** - Send multiple protocol rounds' messages together when possible
+2. **Compress payloads** - Large messages benefit from compression before sending
+3. **Parallel sends** - The router's `SendTo` can be called concurrently from goroutines
+4. **Buffer sizing** - Tune your delivery's buffer sizes for expected message rates
+5. **Connection pooling** - Reuse connections across multiple protocol executions
+</Tip>
+
+## Security Considerations
+
+<Warning>
+**Important Security Notes:**
+
+1. **Authentication** - The `Delivery` interface doesn't provide authentication. Implement TLS, noise protocol, or similar at the transport layer.
+
+2. **Message ordering** - The router doesn't guarantee order preservation. Use sequence numbers if needed.
+
+3. **Party identity** - Validate that `sharing.ID` values map to authenticated parties.
+
+4. **Denial of service** - Implement rate limiting and message size limits in your `Delivery`.
+
+5. **Session isolation** - Use unique session IDs (SID) to prevent cross-session attacks.
+
+6. **Correlation ID entropy** - Use high-entropy correlation IDs to prevent guessing attacks.
+</Warning>
+
+## Best Practices
+
+<Steps>
+
+<Step title="Use Correlation IDs Consistently">
+
+Create a naming scheme for your protocol:
+
+```go
+const (
+    ProtocolPrefix = "myprotocol"
+)
+
+func corrID(sessionID string, round int) string {
+    return fmt.Sprintf("%s:%s:r%d", ProtocolPrefix, sessionID, round)
+}
+
+// Usage
+err := router.SendTo(corrID(sid, 1), messages)
+```
+
+</Step>
+
+<Step title="Handle Partial Failures">
+
+Track which parties responded:
+
+```go
+responses, err := router.ReceiveFrom(corrID, allParties...)
+if err != nil {
+    return err
+}
+
+// Check who responded
+for _, id := range allParties {
+    if _, ok := responses[id]; !ok {
+        log.Printf("Party %v did not respond", id)
+    }
+}
+```
+
+</Step>
+
+<Step title="Log Network Events">
+
+Instrument your delivery:
+
+```go
+func (d *MyDelivery) Send(to sharing.ID, msg []byte) error {
+    log.Printf("Sending %d bytes to party %v", len(msg), to)
+    start := time.Now()
+    err := d.transport.Send(to, msg)
+    log.Printf("Send completed in %v", time.Since(start))
+    return err
+}
+```
+
+</Step>
+
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Threshold Signing" icon="signature" href="/guides/threshold-signing">
+    Complete threshold signing workflow using these networking patterns
+  </Card>
+  <Card title="Custom Protocols" icon="code" href="/guides/custom-protocols">
+    Build your own MPC protocols with network coordination
+  </Card>
+  <Card title="Custom Protocols" icon="code" href="/guides/custom-protocols">
+    Building custom MPC protocols
+  </Card>
+  <Card title="Security Best Practices" icon="shield-check" href="/guides/security-best-practices">
+    Security guidelines and best practices
+  </Card>
+</CardGroup>

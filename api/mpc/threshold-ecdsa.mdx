@@ -1,0 +1,345 @@
+---
+title: 'Threshold ECDSA Signatures'
+description: 'DKLs23 and Lindell17 threshold ECDSA signature protocols'
+---
+
+## Overview
+
+The threshold ECDSA package provides two implementations for multi-party ECDSA signing:
+
+- **DKLs23**: Modern 5-round protocol with optimal communication (Damgård et al. 2023)
+- **Lindell17**: Two-party ECDSA protocol (Lindell 2017)
+
+Both protocols enable multiple parties to jointly produce ECDSA signatures without reconstructing the private key.
+
+## DKLs23 Protocol
+
+**Location**: `pkg/mpc/tsig/tecdsa/dkls23/`
+
+The DKLs23 protocol is a state-of-the-art threshold ECDSA scheme supporting multiple signing variants (standard sign, BBOT, and SoftSpoken OT).
+
+### Core Types
+
+#### Shard
+
+```go
+type Shard[P curves.Point[P, B, S], B algebra.PrimeFieldElement[B], S algebra.PrimeFieldElement[S]] struct {
+    *tecdsa.Shard[P, B, S]
+    AuxiliaryInfo
+}
+```
+
+Holds a tECDSA key share including auxiliary information for oblivious transfer.
+
+**NewShard**:
+```go
+func NewShard[P curves.Point[P, B, S], B, S](
+    baseShard *tecdsa.Shard[P, B, S],
+    auxInfo *AuxiliaryInfo,
+) (*Shard[P, B, S], error)
+```
+
+<ParamField path="baseShard" type="*tecdsa.Shard[P, B, S]" required>
+  The base tECDSA shard containing the secret share and public key
+</ParamField>
+
+<ParamField path="auxInfo" type="*AuxiliaryInfo" required>
+  Auxiliary information including OT sender and receiver seeds
+</ParamField>
+
+#### AuxiliaryInfo
+
+```go
+type AuxiliaryInfo struct {
+    otSenderSeeds   ds.Map[sharing.ID, *vsot.SenderOutput]
+    otReceiverSeeds ds.Map[sharing.ID, *vsot.ReceiverOutput]
+}
+```
+
+Holds auxiliary key material for oblivious transfer operations.
+
+**Methods**:
+- `OTSenderSeeds() ds.Map[sharing.ID, *vsot.SenderOutput]`: Returns OT sender seeds
+- `OTReceiverSeeds() ds.Map[sharing.ID, *vsot.ReceiverOutput]`: Returns OT receiver seeds
+
+#### PartialSignature
+
+```go
+type PartialSignature[P curves.Point[P, B, S], B, S] struct {
+    r P  // Signature nonce point
+    u S  // Intermediate value u
+    w S  // Intermediate value w
+}
+```
+
+Holds a partial ECDSA signature component.
+
+**NewPartialSignature**:
+```go
+func NewPartialSignature[P, B, S](
+    r P, u, w S,
+) (*PartialSignature[P, B, S], error)
+```
+
+### Key Generation
+
+#### DKG Runner
+
+```go
+func NewRunner[P curves.Point[P, B, S], B, S](
+    ctx *session.Context,
+    baseShard *tecdsa.Shard[P, B, S],
+    prng io.Reader,
+) (network.Runner[*dkls23.Shard[P, B, S]], error)
+```
+
+Creates a DKG runner for generating DKLs23 shards with auxiliary information.
+
+<ParamField path="ctx" type="*session.Context" required>
+  MPC session context with party ID and quorum
+</ParamField>
+
+<ParamField path="baseShard" type="*tecdsa.Shard[P, B, S]" required>
+  Base ECDSA shard from initial DKG
+</ParamField>
+
+<ParamField path="prng" type="io.Reader" required>
+  Cryptographically secure random number generator
+</ParamField>
+
+<ResponseField name="network.Runner[*dkls23.Shard[P, B, S]]">
+  Runner that executes the 6-round DKG protocol
+</ResponseField>
+
+**Protocol Rounds**:
+1. Exchange OT setup messages
+2. OT receiver responds
+3. OT sender sends encrypted messages
+4. Verify OT consistency
+5. Commit to auxiliary shares
+6. Open commitments and finalize
+
+### Signing Protocol
+
+#### Interactive Signing (Standard)
+
+**Location**: `pkg/mpc/tsig/tecdsa/dkls23/signing/interactive/sign/`
+
+```go
+func NewCosigner[P curves.Point[P, B, S], B, S](
+    ctx *session.Context,
+    suite *ecdsa.Suite[P, B, S],
+    shard *tecdsa.Shard[P, B, S],
+    prng io.Reader,
+) (*Cosigner[P, B, S], error)
+```
+
+Creates a cosigner for the standard DKLs23 signing protocol.
+
+**Signing Rounds**:
+- **Round1**: Exchange initial commitments and nonce shares
+- **Round2**: Exchange masked values and consistency proofs
+- **Round3**: Broadcast R commitments and send encrypted shares (p2p)
+- **Round4**: Open R commitments and verify (broadcast + p2p)
+- **Round5**: Compute and return partial signature
+
+#### SoftSpoken OT Signing
+
+**Location**: `pkg/mpc/tsig/tecdsa/dkls23/signing/interactive/sign_softspoken/`
+
+Optimized variant using SoftSpoken oblivious transfer for improved efficiency.
+
+#### BBOT Signing
+
+**Location**: `pkg/mpc/tsig/tecdsa/dkls23/signing/interactive/sign_bbot/`
+
+Variant using batch-based oblivious transfer.
+
+### Signature Aggregation
+
+```go
+func Aggregate[P curves.Point[P, B, S], B, S](
+    suite *ecdsa.Suite[P, B, S],
+    publicKey *ecdsa.PublicKey[P, B, S],
+    message []byte,
+    partialSignatures ...*PartialSignature[P, B, S],
+) (*ecdsa.Signature[S], error)
+```
+
+Computes the sum of partial signatures to produce a valid ECDSA signature.
+
+<ParamField path="suite" type="*ecdsa.Suite[P, B, S]" required>
+  ECDSA suite defining the curve and hash function
+</ParamField>
+
+<ParamField path="publicKey" type="*ecdsa.PublicKey[P, B, S]" required>
+  The joint public key for verification
+</ParamField>
+
+<ParamField path="message" type="[]byte" required>
+  The message that was signed
+</ParamField>
+
+<ParamField path="partialSignatures" type="...*PartialSignature[P, B, S]" required>
+  Partial signatures from all cosigners
+</ParamField>
+
+<ResponseField name="*ecdsa.Signature[S]">
+  Complete ECDSA signature (r, s) in normalized low-s form with recovery ID
+</ResponseField>
+
+### DKLs23 Usage Example
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tecdsa/dkls23"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tecdsa/dkls23/keygen/dkg"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tecdsa/dkls23/signing/interactive/sign"
+)
+
+// 1. Generate DKLs23 shard with auxiliary info
+runner, err := dkg.NewRunner(ctx, baseShard, prng)
+shard, err := runner.Run(router)
+
+// 2. Create cosigner
+ecdsaSuite, err := ecdsa.NewSuite(curve, hashFunc)
+cosigner, err := sign.NewCosigner(ctx, ecdsaSuite, shard.Shard, prng)
+
+// 3. Execute 5 signing rounds
+r1Out, err := cosigner.Round1()
+// ... exchange messages for each round ...
+partialSig, err := cosigner.Round5(r5bIn, r5uIn, message)
+
+// 4. Aggregate signatures
+signature, err := dkls23.Aggregate(ecdsaSuite, publicKey, message, partialSignatures...)
+```
+
+## Lindell17 Protocol
+
+**Location**: `pkg/mpc/tsig/tecdsa/lindell17/`
+
+The Lindell17 protocol is a two-party ECDSA signing scheme with threshold t=2.
+
+### Core Types
+
+#### PartialSignature
+
+```go
+type PartialSignature struct {
+    C3 *paillier.Ciphertext
+}
+```
+
+Carries the encrypted partial signature value using Paillier encryption.
+
+**NewPartialSignature**:
+```go
+func NewPartialSignature(c3 *paillier.Ciphertext) (*PartialSignature, error)
+```
+
+<ParamField path="c3" type="*paillier.Ciphertext" required>
+  Paillier ciphertext containing encrypted partial signature
+</ParamField>
+
+### Key Generation
+
+**DKG Location**: `pkg/mpc/tsig/tecdsa/lindell17/keygen/dkg/`
+
+```go
+func NewRunner[P curves.Point[P, B, S], B, S](
+    ctx *session.Context,
+    baseShard *tecdsa.Shard[P, B, S],
+    prng io.Reader,
+) (network.Runner[*tecdsa.Shard[P, B, S]], error)
+```
+
+Creates a runner for Lindell17 key generation (2-party only).
+
+### Signing Protocol
+
+**Location**: `pkg/mpc/tsig/tecdsa/lindell17/signing/`
+
+```go
+func NewRunner[P curves.Point[P, B, S], B, S](
+    ctx *session.Context,
+    shard *tecdsa.Shard[P, B, S],
+    suite *ecdsa.Suite[P, B, S],
+    message []byte,
+    prng io.Reader,
+) (network.Runner[*PartialSignature], error)
+```
+
+Creates a runner for the Lindell17 signing protocol.
+
+**Protocol Characteristics**:
+- Two-party only (threshold = 2)
+- Uses Paillier homomorphic encryption
+- Requires range proofs for security
+- Multiple rounds of interaction
+
+### Lindell17 Usage Example
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tecdsa/lindell17"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tecdsa/lindell17/keygen/dkg"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tecdsa/lindell17/signing"
+)
+
+// 1. Generate shards (2 parties only)
+dkgRunner, err := dkg.NewRunner(ctx, baseShard, prng)
+shard, err := dkgRunner.Run(router)
+
+// 2. Sign message
+sigRunner, err := signing.NewRunner(ctx, shard, suite, message, prng)
+partialSig, err := sigRunner.Run(router)
+
+// 3. Both parties aggregate their partial signatures
+// (protocol-specific aggregation)
+```
+
+## Utility Functions
+
+### QuorumBytes (Lindell17)
+
+```go
+func QuorumBytes(quorum ds.Set[sharing.ID]) [][]byte
+```
+
+Returns sorted quorum IDs in big-endian byte format for protocol parameters.
+
+## Security Considerations
+
+### DKLs23
+- Supports arbitrary threshold t-of-n
+- Requires auxiliary information setup (OT seeds)
+- Secure against malicious adversaries with abort
+- Uses oblivious transfer for privacy
+- Communication-efficient design
+
+### Lindell17
+- Two-party only (t=2)
+- Relies on Paillier encryption assumption
+- Requires range proofs for zero-knowledge
+- Higher computational cost than DKLs23
+- No auxiliary information required
+
+## Protocol Comparison
+
+| Feature | DKLs23 | Lindell17 |
+|---------|--------|----------|
+| Threshold | Any t-of-n | 2-of-2 only |
+| Rounds | 5 | Multiple |
+| Setup | Requires OT | Requires Paillier keys |
+| Security | Malicious with abort | Malicious with abort |
+| Efficiency | High | Moderate |
+| Variants | 3 variants | Standard |
+
+## Error Handling
+
+Both protocols provide detailed error information:
+
+- **ErrNil**: Nil argument provided
+- **ErrFailed**: Protocol execution failed
+- **ErrInvalidArgument**: Invalid parameter
+- Identifiable aborts include party ID tags

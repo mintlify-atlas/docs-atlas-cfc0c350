@@ -1,0 +1,349 @@
+---
+title: 'System Architecture'
+description: 'Overview of the Bron Crypto library architecture and package structure'
+icon: 'sitemap'
+---
+
+## Overview
+
+The Bron Crypto library is organized into a modular, layered architecture that builds from low-level cryptographic primitives up to high-level Multi-Party Computation (MPC) protocols. This design emphasizes reusability, composability, and clear separation of concerns.
+
+## Package Structure
+
+The library is organized into the following top-level packages:
+
+<CardGroup cols={2}>
+  <Card title="base" icon="cubes">
+    Foundational primitives including elliptic curves, number theory, data structures, and algebraic abstractions
+  </Card>
+  <Card title="mpc" icon="users">
+    Multi-party computation protocols including threshold signatures, secret sharing, and distributed key generation
+  </Card>
+  <Card title="proofs" icon="shield-check">
+    Zero-knowledge proofs including sigma protocols, Schnorr proofs, and protocol compilers
+  </Card>
+  <Card title="encryption" icon="lock">
+    Encryption schemes including Paillier homomorphic encryption and HPKE
+  </Card>
+  <Card title="commitments" icon="fingerprint">
+    Commitment schemes including Pedersen, hash-based, and IND-CPA commitments
+  </Card>
+  <Card title="signatures" icon="signature">
+    Digital signature schemes and primitives
+  </Card>
+  <Card title="hashing" icon="hashtag">
+    Hash functions including BIP340, KMAC, and Poseidon
+  </Card>
+  <Card title="network" icon="network-wired">
+    Networking abstractions for MPC protocols including broadcast channels and message routing
+  </Card>
+  <Card title="ot" icon="exchange-alt">
+    Oblivious Transfer protocols including extensions and optimizations
+  </Card>
+  <Card title="key_agreement" icon="handshake">
+    Key agreement protocols including Diffie-Hellman
+  </Card>
+  <Card title="transcripts" icon="file-lines">
+    Transcript management for Fiat-Shamir transformations
+  </Card>
+</CardGroup>
+
+## Base Layer
+
+The `pkg/base/` package provides the foundational building blocks:
+
+### Algebraic Abstractions
+
+**Location**: `pkg/base/algebra/`
+
+Defines generic interfaces for algebraic structures used throughout the library:
+- Groups, fields, and rings
+- Homomorphic operations
+- Scalar multiplication and group actions
+
+<Info>
+These abstractions enable writing generic cryptographic protocols that work with any compatible curve or field implementation.
+</Info>
+
+### Curves and Elliptic Curve Cryptography
+
+**Location**: `pkg/base/curves/`
+
+Supports multiple elliptic curves with side-channel resistant implementations:
+- **K256** (secp256k1) - Bitcoin/Ethereum curve
+- **P256** (NIST P-256) - NIST standard curve
+- **Curve25519** - X25519 key exchange
+- **Edwards25519** - Ed25519 signatures
+
+Curve implementations use **fiat-cryptography** generated code for constant-time operations.
+
+### Number Theory
+
+**Location**: `pkg/base/nt/`
+
+Provides number-theoretic operations:
+- **CRT** (Chinese Remainder Theorem) - Used in Paillier decryption
+- **Fast modular arithmetic** - Optimized modular operations
+- **Prime field arithmetic** - Operations in prime finite fields
+- **Constant-time operations** (`numct`) - Side-channel resistant big integers using [saferith](https://github.com/cronokirby/saferith) and [BoringSSL](https://boringssl.googlesource.com/boringssl/)
+
+### Data Structures
+
+**Location**: `pkg/base/datastructures/`
+
+Thread-safe and efficient data structures for cryptographic use:
+- Hash maps and hash sets
+- Type-safe collections with generic interfaces
+- Frozen (immutable) collections for safety
+
+## Cryptographic Primitives Layer
+
+### Encryption Schemes
+
+**Location**: `pkg/encryption/`
+
+Implements public-key encryption with a generic interface architecture:
+
+```go
+type Scheme[SK PrivateKey[SK], PK PublicKey[PK], 
+    M Plaintext, C Ciphertext[C], N Nonce,
+    KG KeyGenerator[SK, PK], 
+    ENC Encrypter[PK, M, C, N], 
+    DEC Decrypter[M, C]] interface {
+    Name() Name
+    Keygen(...KeyGeneratorOption[KG, SK, PK]) (KG, error)
+    Encrypter(...EncrypterOption[ENC, PK, M, C, N]) (ENC, error)
+    Decrypter(SK, ...DecrypterOption[DEC, M, C]) (DEC, error)
+}
+```
+
+<Accordion title="Paillier Homomorphic Encryption">
+  **Location**: `pkg/encryption/paillier/`
+
+  Implements the Paillier cryptosystem with additive homomorphic properties:
+  - **HomAdd**: `Enc(m₁) · Enc(m₂) = Enc(m₁ + m₂)`
+  - **ScalarMul**: `Enc(m)^k = Enc(k · m)`
+  - **Shift**: Add plaintext to ciphertext
+  - **CRT-optimized**: Self-encryption uses Chinese Remainder Theorem for 3x speedup
+
+  Used extensively in threshold ECDSA protocols like DKLs23.
+</Accordion>
+
+### Commitment Schemes
+
+**Location**: `pkg/commitments/`
+
+Generic commitment scheme interface with multiple implementations:
+
+```go
+type Scheme[K Key, W Witness, M Message, C Commitment[C], 
+    COM Committer[W, M, C], VF Verifier[W, M, C]] interface {
+    Name() Name
+    Committer(...CommitterOption[COM, W, M, C]) (COM, error)
+    Verifier(...VerifierOption[VF, W, M, C]) (VF, error)
+    Key() K
+}
+```
+
+**Implementations**:
+- **Pedersen** (`pkg/commitments/pedersen/`) - Perfectly hiding, computationally binding
+- **Hash-based** (`pkg/commitments/hash/`) - Computationally hiding and binding
+- **IND-CPA** (`pkg/commitments/indcpacom/`) - Based on IND-CPA encryption
+
+### Zero-Knowledge Proofs
+
+**Location**: `pkg/proofs/`
+
+Extensive zero-knowledge proof system with composable components.
+
+<CardGroup cols={2}>
+  <Card title="Sigma Protocols" icon="sigma">
+    **Location**: `pkg/proofs/sigma/`
+    
+    Three-round public-coin protocols:
+    - Commitment (Prover → Verifier)
+    - Challenge (Verifier → Prover)
+    - Response (Prover → Verifier)
+  </Card>
+  <Card title="Compilers" icon="code">
+    **Location**: `pkg/proofs/sigma/compiler/`
+    
+    Transform interactive proofs to non-interactive:
+    - Fiat-Shamir
+    - Fischlin
+    - Randomised Fischlin
+  </Card>
+  <Card title="Composition" icon="layer-group">
+    **Location**: `pkg/proofs/sigma/compose/`
+    
+    Combine proofs logically:
+    - AND composition (prove multiple statements)
+    - OR composition (prove one of many statements)
+  </Card>
+  <Card title="Discrete Log Proofs" icon="function">
+    **Location**: `pkg/proofs/dlog/`
+    
+    Prove knowledge of discrete logarithms:
+    - Schnorr proofs
+    - Batch Schnorr proofs
+  </Card>
+</CardGroup>
+
+## MPC Protocol Layer
+
+**Location**: `pkg/mpc/`
+
+High-level multi-party computation protocols built on the primitives above.
+
+### Secret Sharing
+
+**Location**: `pkg/mpc/sharing/`
+
+Generic secret sharing with multiple schemes:
+
+```go
+type SSS[S Share[S], W Secret[W], 
+    DO DealerOutput[S], AC accessstructures.Monotone] interface {
+    Name() Name
+    Deal(secret W, prng io.Reader) (DO, error)
+    DealRandom(prng io.Reader) (DO, W, error)
+    Reconstruct(shares ...S) (secret W, err error)
+    AccessStructure() AC
+}
+```
+
+**Schemes**:
+- **Shamir** (`scheme/shamir/`) - Polynomial-based threshold sharing
+- **Additive** (`scheme/additive/`) - Simple XOR/addition-based sharing
+- **Feldman VSS** (`vss/feldman/`) - Verifiable with public commitments
+- **Pedersen VSS** (`vss/pedersen/`) - Verifiable with hiding commitments
+
+### Threshold Signatures
+
+**Location**: `pkg/mpc/tsig/`
+
+The core focus of the library - threshold signature protocols:
+
+<CardGroup cols={3}>
+  <Card title="Threshold Schnorr" icon="pen-nib">
+    **Location**: `tbls/boldyreva02/`
+    
+    [Lindell22](https://eprint.iacr.org/2022/374) implementation
+  </Card>
+  <Card title="Threshold ECDSA" icon="bitcoin-sign">
+    **Location**: `tecdsa/dkls23/` and `tecdsa/lindell17/`
+    
+    Multiple variants:
+    - DKLs23 with OT extensions
+    - DKLs23 without OT (BBOT)
+    - DKLs23 with inline base OT
+    - Lindell17 protocol
+  </Card>
+  <Card title="Threshold BLS" icon="key">
+    **Location**: `tbls/boldyreva02/`
+    
+    [Boldyreva02](https://link.springer.com/chapter/10.1007/3-540-36288-6_3) implementation
+  </Card>
+</CardGroup>
+
+### Distributed Key Generation
+
+**Location**: `pkg/mpc/dkg/gennaro/`
+
+Implements the [Gennaro et al.](https://link.springer.com/content/pdf/10.1007/s00145-006-0347-3.pdf) DKG protocol:
+
+1. **Round 1**: Each party deals Pedersen VSS
+2. **Round 2**: Broadcast Feldman verification vectors with batch Schnorr proofs
+3. **Round 3**: Verify and aggregate shares
+
+### Oblivious Transfer
+
+**Location**: `pkg/ot/`
+
+OT protocols used in threshold ECDSA:
+- Base OT protocols
+- OT extensions (softspoken)
+- BBOT (Batched Base OT)
+
+Used in DKLs23 signing protocol variants.
+
+## Network Abstraction Layer
+
+**Location**: `pkg/network/`
+
+Provides abstractions for distributed protocol execution:
+
+- **Router**: Message routing between parties
+- **Echo Broadcast**: Reliable broadcast channel implementation
+- **Session Management**: Protocol session identifiers and state
+- **Message Exchange**: Point-to-point and broadcast primitives
+
+<Warning>
+The networking layer provides abstractions only. Actual network transport (TCP, WebSockets, etc.) is out of scope and must be implemented by applications.
+</Warning>
+
+## Design Philosophy
+
+### Interface-Driven Design
+
+The library extensively uses Go generics and interfaces to provide:
+- **Type safety** at compile time
+- **Flexibility** to swap implementations
+- **Composability** of cryptographic primitives
+
+Example from `pkg/commitments/commitments.go:62`:
+
+```go
+type Scheme[K Key, W Witness, M Message, C Commitment[C], 
+    COM Committer[W, M, C], VF Verifier[W, M, C]] interface {
+    Name() Name
+    Committer(...CommitterOption[COM, W, M, C]) (COM, error)
+    Verifier(...VerifierOption[VF, W, M, C]) (VF, error)
+    Key() K
+}
+```
+
+### Modular Components
+
+Cryptographic primitives are designed for reuse:
+- Sigma protocols can use different **compilers** (Fiat-Shamir, Fischlin)
+- Sigma protocols can be **composed** (AND, OR)
+- CRT and modular arithmetic used by both Paillier and future RSA applications
+
+### Stateless Protocols
+
+Threshold signature protocols are designed to be stateless:
+- No persistent state between protocol rounds
+- All state passed explicitly
+- Simplifies orchestration and error recovery
+
+## Dependencies
+
+### External Cryptographic Libraries
+
+- **fiat-cryptography**: Formally verified elliptic curve implementations
+- **saferith**: Constant-time big integer arithmetic
+- **BoringSSL**: Side-channel resistant operations via CGO
+
+### Build Requirements
+
+<Info>
+The library requires **CGO** and links against **BoringSSL**. See [DEVELOPMENT.md](https://github.com/bronlabs/bron-crypto/blob/main/DEVELOPMENT.md) for setup instructions.
+</Info>
+
+## Related Resources
+
+<CardGroup cols={2}>
+  <Card title="Design Principles" icon="lightbulb" href="/concepts/design-principles">
+    Learn about redundancy, reusability, and interface design
+  </Card>
+  <Card title="Security Model" icon="shield-halved" href="/concepts/security">
+    Understand side-channel resistance and security boundaries
+  </Card>
+  <Card title="Threshold Cryptography" icon="users" href="/concepts/threshold-cryptography">
+    Deep dive into secret sharing and threshold protocols
+  </Card>
+  <Card title="Zero-Knowledge Proofs" icon="eye-slash" href="/concepts/zero-knowledge-proofs">
+    Understand sigma protocols and proof composition
+  </Card>
+</CardGroup>

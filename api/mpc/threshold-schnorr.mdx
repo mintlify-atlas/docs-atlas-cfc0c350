@@ -1,0 +1,287 @@
+---
+title: 'Threshold Schnorr Signatures'
+description: 'Lindell22 threshold Schnorr signature protocol implementation'
+---
+
+## Overview
+
+The `lindell22` package implements the Lindell 2022 threshold Schnorr signing protocol. This protocol allows multiple parties to jointly produce Schnorr signatures without reconstructing the private key.
+
+**Location**: `pkg/mpc/tsig/tschnorr/lindell22/`
+
+## Key Features
+
+- Three-round signing protocol with commitment-based security
+- Support for any MPC-friendly Schnorr variant
+- Identifiable abort for detecting malicious signers
+- Hash-based commitment scheme with Random Oracle security
+- Compatible with Gennaro DKG for key generation
+
+## Core Types
+
+### Shard
+
+```go
+type Shard[GE algebra.PrimeGroupElement[GE, S], S algebra.PrimeFieldElement[S]] = tschnorr.Shard[GE, S]
+```
+
+Represents a party's secret key share for threshold Schnorr signing. Contains the party's share of the private key and verification material.
+
+### PublicMaterial
+
+```go
+type PublicMaterial[GE algebra.PrimeGroupElement[GE, S], S algebra.PrimeFieldElement[S]] = tschnorr.PublicMaterial[GE, S]
+```
+
+Contains public information shared among signing parties, including the joint public key and partial public keys.
+
+### PartialSignature
+
+```go
+type PartialSignature[GE algebra.PrimeGroupElement[GE, S], S algebra.PrimeFieldElement[S]] struct {
+    Sig schnorrlike.Signature[GE, S]
+}
+```
+
+A party's contribution to the threshold signature, containing the challenge (E), nonce commitment (R), and response (S).
+
+## Key Generation
+
+### NewShard
+
+```go
+func NewShard[GE algebra.PrimeGroupElement[GE, S], S algebra.PrimeFieldElement[S]](
+    output *gennaro.DKGOutput[GE, S],
+) (*lindell22.Shard[GE, S], error)
+```
+
+Creates a threshold Schnorr shard from Gennaro DKG output.
+
+<ParamField path="output" type="*gennaro.DKGOutput[GE, S]" required>
+  The output from a Gennaro distributed key generation protocol
+</ParamField>
+
+<ResponseField name="*lindell22.Shard[GE, S]">
+  The created threshold Schnorr shard containing the party's secret share
+</ResponseField>
+
+<ResponseField name="error">
+  Returns error if DKG output is invalid or shard creation fails
+</ResponseField>
+
+## Signing Protocol
+
+### Cosigner
+
+```go
+type Cosigner[GE algebra.PrimeGroupElement[GE, S], S algebra.PrimeFieldElement[S], M schnorrlike.Message] struct
+```
+
+A participant in the Lindell22 threshold Schnorr signing protocol. Manages the three-round signing process.
+
+#### NewCosigner
+
+```go
+func NewCosigner[GE algebra.PrimeGroupElement[GE, S], S algebra.PrimeFieldElement[S], M schnorrlike.Message](
+    ctx *session.Context,
+    shard *lindell22.Shard[GE, S],
+    niCompilerName compiler.Name,
+    variant tschnorr.MPCFriendlyVariant[GE, S, M],
+    prng io.Reader,
+) (*Cosigner[GE, S, M], error)
+```
+
+Creates a new cosigner for threshold Schnorr signing.
+
+<ParamField path="ctx" type="*session.Context" required>
+  The MPC session context with party ID and quorum information
+</ParamField>
+
+<ParamField path="shard" type="*lindell22.Shard[GE, S]" required>
+  The party's secret key share
+</ParamField>
+
+<ParamField path="niCompilerName" type="compiler.Name" required>
+  The non-interactive proof compiler to use (e.g., Fiat-Shamir)
+</ParamField>
+
+<ParamField path="variant" type="tschnorr.MPCFriendlyVariant[GE, S, M]" required>
+  The Schnorr signature variant (e.g., standard, BIP340)
+</ParamField>
+
+<ParamField path="prng" type="io.Reader" required>
+  Cryptographically secure random number generator
+</ParamField>
+
+#### Methods
+
+**Round1**: Generates commitment to nonce
+```go
+func (c *Cosigner[GE, S, M]) Round1() (*Round1Broadcast, error)
+```
+
+**Round2**: Opens commitment and produces zero-knowledge proof
+```go
+func (c *Cosigner[GE, S, M]) Round2(r2bIn network.RoundMessages[*Round1Broadcast]) (*Round2Broadcast[GE, S], error)
+```
+
+**Round3**: Computes partial signature using aggregated nonce
+```go
+func (c *Cosigner[GE, S, M]) Round3(r3bIn network.RoundMessages[*Round2Broadcast[GE, S]], message M) (*PartialSignature[GE, S], error)
+```
+
+### NewRunner
+
+```go
+func NewRunner[GE algebra.PrimeGroupElement[GE, S], S algebra.PrimeFieldElement[S], M schnorrlike.Message](
+    ctx *session.Context,
+    shard *lindell22.Shard[GE, S],
+    niCompilerName compiler.Name,
+    variant tschnorr.MPCFriendlyVariant[GE, S, M],
+    message M,
+    prng io.Reader,
+) (network.Runner[*lindell22.PartialSignature[GE, S]], error)
+```
+
+Constructs a network runner that drives the three Lindell22 signing rounds automatically.
+
+## Signature Aggregation
+
+### Aggregator
+
+```go
+type Aggregator[VR tschnorr.MPCFriendlyVariant[GE, S, M], GE algebra.PrimeGroupElement[GE, S], S algebra.PrimeFieldElement[S], M schnorrlike.Message] struct
+```
+
+Combines partial signatures into a complete threshold signature.
+
+#### NewAggregator
+
+```go
+func NewAggregator[SCH tschnorr.MPCFriendlyScheme[VR, GE, S, M, KG, SG, VF], ...](
+    pk *lindell22.PublicMaterial[GE, S],
+    scheme SCH,
+) (*Aggregator[VR, GE, S, M], error)
+```
+
+Creates a new signature aggregator for the given public material and scheme.
+
+<ParamField path="pk" type="*lindell22.PublicMaterial[GE, S]" required>
+  Public key material for verification
+</ParamField>
+
+<ParamField path="scheme" type="SCH" required>
+  The Schnorr signature scheme to use
+</ParamField>
+
+#### Aggregate
+
+```go
+func (a *Aggregator[VR, GE, S, M]) Aggregate(
+    partialSignatures network.RoundMessages[*lindell22.PartialSignature[GE, S]],
+    message M,
+) (*schnorrlike.Signature[GE, S], error)
+```
+
+Combines partial signatures into a complete signature, verifying validity. Returns an identifiable abort error if any partial signature is invalid.
+
+<ParamField path="partialSignatures" type="network.RoundMessages[*PartialSignature[GE, S]]" required>
+  Collection of partial signatures from cosigners
+</ParamField>
+
+<ParamField path="message" type="M" required>
+  The message that was signed
+</ParamField>
+
+<ResponseField name="*schnorrlike.Signature[GE, S]">
+  The complete Schnorr signature (E, R, S)
+</ResponseField>
+
+## Commitment Scheme
+
+### NewCommitmentKey
+
+```go
+func NewCommitmentKey(sid network.SID, pid sharing.ID, quorumBytes [][]byte) (CommitmentKey, error)
+```
+
+Creates a commitment key from session ID, party ID, and quorum information.
+
+<ParamField path="sid" type="network.SID" required>
+  Session identifier
+</ParamField>
+
+<ParamField path="pid" type="sharing.ID" required>
+  Party identifier
+</ParamField>
+
+<ParamField path="quorumBytes" type="[][]byte" required>
+  Sorted quorum IDs in big-endian format
+</ParamField>
+
+### QuorumBytes
+
+```go
+func QuorumBytes(quorum ds.Set[sharing.ID]) [][]byte
+```
+
+Returns sorted quorum IDs in big-endian format, used for commitment scheme CRS and dlog proofs.
+
+## Usage Example
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22/keygen"
+    "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tschnorr/lindell22/signing"
+)
+
+// 1. Create shard from DKG output
+shard, err := keygen.NewShard(dkgOutput)
+
+// 2. Create cosigner
+cosigner, err := signing.NewCosigner(
+    ctx,
+    shard,
+    fiatshamir.Name,
+    schnorrVariant,
+    prng,
+)
+
+// 3. Execute signing rounds
+r1Out, err := cosigner.Round1()
+r2In := exchangeMessages(r1Out) // Network exchange
+r2Out, err := cosigner.Round2(r2In)
+r3In := exchangeMessages(r2Out)
+partialSig, err := cosigner.Round3(r3In, message)
+
+// 4. Aggregate signatures
+aggregator, err := signing.NewAggregator(publicMaterial, scheme)
+signature, err := aggregator.Aggregate(partialSignatures, message)
+```
+
+## Security Considerations
+
+- Uses hash-based commitment scheme, requiring Random Oracle assumption
+- Provides identifiable abort: can detect which party produced invalid partial signature
+- All parties must participate in all three rounds
+- Nonce must be sampled with cryptographically secure randomness
+- Session ID should be unique per signing session
+
+## Protocol Rounds
+
+**Round 1**: Each party commits to their nonce share
+- Sample random nonce k_i
+- Compute R_i = k_i · G
+- Commit to R_i and broadcast commitment
+
+**Round 2**: Open commitments and prove knowledge
+- Open commitment to reveal R_i
+- Provide zero-knowledge proof of knowledge of k_i
+- Verify all received commitments and proofs
+
+**Round 3**: Compute partial signatures
+- Aggregate R = Σ R_i
+- Compute challenge e = H(R || PK || m)
+- Compute partial response s_i using Lagrange coefficients
+- Broadcast partial signature (e, R, s_i)

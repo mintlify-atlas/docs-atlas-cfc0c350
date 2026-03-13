@@ -1,0 +1,441 @@
+---
+title: 'Commitments'
+description: 'Cryptographic commitment schemes including Pedersen and hash-based commitments'
+---
+
+## Overview
+
+Commitment schemes allow a party to commit to a value while keeping it hidden, with the ability to reveal the committed value later. The library provides:
+
+- **Pedersen**: Homomorphic commitment scheme based on elliptic curves
+- **Hash-based**: Simple HMAC-based commitments with computational hiding
+
+## Core Interfaces
+
+### Scheme
+
+The main commitment scheme interface that provides factory methods for committers and verifiers.
+
+```go
+type Scheme[K, W, M, C, COM, VF] interface {
+    Name() Name
+    Committer(...CommitterOption) (COM, error)
+    Verifier(...VerifierOption) (VF, error)
+    Key() K
+}
+```
+
+### Committer
+
+Produces commitments from messages with randomness (witness).
+
+```go
+type Committer[W, M, C] interface {
+    Commit(message M, prng io.Reader) (C, W, error)
+    CommitWithWitness(message M, witness W) (C, error)
+}
+```
+
+<ParamField path="message" type="M">
+  Value to commit to
+</ParamField>
+
+<ParamField path="prng" type="io.Reader">
+  Random source for witness generation
+</ParamField>
+
+<ResponseField name="commitment" type="C">
+  The commitment value
+</ResponseField>
+
+<ResponseField name="witness" type="W">
+  The randomness/opening value
+</ResponseField>
+
+### Verifier
+
+Checks that a commitment opens to a claimed message.
+
+```go
+type Verifier[W, M, C] interface {
+    Verify(commitment C, message M, witness W) error
+}
+```
+
+<ParamField path="commitment" type="C">
+  The commitment to verify
+</ParamField>
+
+<ParamField path="message" type="M">
+  Claimed message value
+</ParamField>
+
+<ParamField path="witness" type="W">
+  Opening/decommitment value
+</ParamField>
+
+<ResponseField name="error" type="error">
+  nil if valid, error otherwise
+</ResponseField>
+
+---
+
+## Pedersen Commitments
+
+Pedersen commitments are perfectly hiding and computationally binding commitments based on the discrete logarithm problem. They support homomorphic operations.
+
+### Features
+
+- **Perfect Hiding**: Commitment reveals no information about the message
+- **Computational Binding**: Infeasible to find two messages with same commitment
+- **Additive Homomorphism**: `Com(m1) + Com(m2) = Com(m1 + m2)`
+- **Rerandomization**: Commitments can be rerandomized
+
+### Location
+
+Source: `~/workspace/source/pkg/commitments/pedersen/pedersen.go:1`
+
+### Construction
+
+A Pedersen commitment has the form: `Com(m, r) = m·G + r·H`
+
+Where:
+- `G`, `H` are elliptic curve generators with unknown discrete log relationship
+- `m` is the message (scalar)
+- `r` is the witness randomness (scalar)
+
+### Creating a Scheme
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+    "github.com/bronlabs/bron-crypto/pkg/commitments/pedersen"
+)
+
+curve := k256.NewCurve()
+field := k256.NewScalarField()
+
+// Generate independent generators
+g := curve.Generator()
+h, err := curve.Hash([]byte("pedersen-h"))
+
+// Create commitment key
+key, err := pedersen.NewCommitmentKey(g, h)
+
+// Create scheme
+scheme, err := pedersen.NewScheme(key)
+```
+
+<ParamField path="g" type="GE" required>
+  First generator (typically the curve's standard generator)
+</ParamField>
+
+<ParamField path="h" type="GE" required>
+  Second generator (must be independent of g)
+</ParamField>
+
+### Committing to a Value
+
+```go
+// Create message
+message := pedersen.NewMessage(field.FromUint64(42))
+
+// Create committer
+committer, err := scheme.Committer()
+
+// Commit with random witness
+commitment, witness, err := committer.Commit(message, prng)
+```
+
+<ResponseField name="commitment" type="*Commitment">
+  Elliptic curve point hiding the message
+</ResponseField>
+
+<ResponseField name="witness" type="*Witness">
+  Random scalar used for hiding
+</ResponseField>
+
+### Verifying a Commitment
+
+```go
+verifier, err := scheme.Verifier()
+err = verifier.Verify(commitment, message, witness)
+if err != nil {
+    // Verification failed
+}
+```
+
+### Committing with Explicit Witness
+
+```go
+// Create witness
+witness, err := pedersen.NewWitness(field.FromUint64(12345))
+
+// Commit with this witness
+commitment, err := committer.CommitWithWitness(message, witness)
+```
+
+### Homomorphic Operations
+
+#### Adding Commitments
+
+```go
+// Com(m1 + m2) = Com(m1) + Com(m2)
+cSum := c1.Op(c2)
+```
+
+#### Scaling Commitments
+
+```go
+// Com(k * m) = k * Com(m)
+scalar := field.FromUint64(5)
+cScaled := commitment.Act(pedersen.NewMessage(scalar))
+```
+
+#### Rerandomization
+
+```go
+cRerand, witnessShift, err := commitment.ReRandomise(key, prng)
+
+// Or with explicit witness shift
+witnessShift, _ := pedersen.NewWitness(field.FromUint64(999))
+cRerand, err := commitment.ReRandomiseWithWitness(key, witnessShift)
+```
+
+### Complete Example
+
+```go
+package main
+
+import (
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"
+    "github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+    "github.com/bronlabs/bron-crypto/pkg/commitments/pedersen"
+)
+
+func main() {
+    prng := pcg.NewRandomised()
+    curve := k256.NewCurve()
+    field := k256.NewScalarField()
+    
+    // Setup commitment key
+    g := curve.Generator()
+    h, _ := curve.Hash([]byte("pedersen-h"))
+    key, _ := pedersen.NewCommitmentKey(g, h)
+    scheme, _ := pedersen.NewScheme(key)
+    
+    // Commit to a value
+    message := pedersen.NewMessage(field.FromUint64(42))
+    committer, _ := scheme.Committer()
+    commitment, witness, _ := committer.Commit(message, prng)
+    
+    // Later: verify the commitment
+    verifier, _ := scheme.Verifier()
+    err := verifier.Verify(commitment, message, witness)
+    // err == nil means valid
+    
+    // Homomorphic addition
+    message2 := pedersen.NewMessage(field.FromUint64(8))
+    commitment2, witness2, _ := committer.Commit(message2, prng)
+    
+    // Sum commitment: Com(42 + 8) = Com(42) + Com(8)
+    commitmentSum := commitment.Op(commitment2)
+    messageSum := message.Op(message2)
+    witnessSum := witness.Op(witness2)
+    
+    // Verify sum
+    err = verifier.Verify(commitmentSum, messageSum, witnessSum)
+    // err == nil: commitment to 50 is valid
+}
+```
+
+---
+
+## Hash-Based Commitments
+
+Hash-based commitments use HMAC to provide computationally hiding and binding commitments with simpler primitives.
+
+### Features
+
+- **Computational Hiding**: Secure against computationally-bounded adversaries
+- **Computational Binding**: Infeasible to find collisions
+- **Efficient**: Fast operations using standard hash functions
+- **No Special Setup**: Works with any hash function
+
+### Location
+
+Source: `~/workspace/source/pkg/commitments/hash/hash.go:1`
+
+### Construction
+
+A hash commitment has the form: `Com(m, r) = HMAC(key, r || m)`
+
+Where:
+- `key` is derived from a common reference string (CRS)
+- `r` is random witness (32 bytes)
+- `m` is the message (arbitrary bytes)
+
+### Creating a Scheme
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/commitments/hash"
+    "github.com/bronlabs/bron-crypto/pkg/network"
+)
+
+// Derive key from session ID and CRS
+sid := network.SID{} // Session identifier
+copy(sid[:], sessionBytes)
+
+key, err := hash.NewKeyFromCRSBytes(
+    sid,
+    "my-protocol-v1",  // Domain separation tag
+    crsTranscript1,     // Common reference strings
+    crsTranscript2,
+)
+
+scheme, err := hash.NewScheme(key)
+```
+
+<ParamField path="sid" type="network.SID" required>
+  Session identifier (32 bytes)
+</ParamField>
+
+<ParamField path="dst" type="string" required>
+  Domain separation tag for protocol context
+</ParamField>
+
+<ParamField path="crs" type="...[]byte">
+  Common reference string transcripts
+</ParamField>
+
+### Committing to Data
+
+```go
+message := hash.Message([]byte("secret data"))
+
+committer, err := scheme.Committer()
+commitment, witness, err := committer.Commit(message, prng)
+```
+
+<ParamField path="message" type="Message">
+  Arbitrary byte slice to commit to
+</ParamField>
+
+<ResponseField name="commitment" type="Commitment">
+  32-byte HMAC digest
+</ResponseField>
+
+<ResponseField name="witness" type="Witness">
+  32-byte random value
+</ResponseField>
+
+### Verifying a Commitment
+
+```go
+verifier, err := scheme.Verifier()
+err = verifier.Verify(commitment, message, witness)
+if err != nil {
+    // Invalid commitment
+}
+```
+
+### Complete Example
+
+```go
+package main
+
+import (
+    "io"
+    "github.com/bronlabs/bron-crypto/pkg/base/prng/pcg"
+    "github.com/bronlabs/bron-crypto/pkg/commitments/hash"
+    "github.com/bronlabs/bron-crypto/pkg/network"
+)
+
+func main() {
+    prng := pcg.NewRandomised()
+    
+    // Setup key from CRS
+    var sid network.SID
+    io.ReadFull(prng, sid[:])
+    
+    key, _ := hash.NewKeyFromCRSBytes(
+        sid,
+        "auction-protocol",
+        []byte("public-parameters"),
+    )
+    scheme, _ := hash.NewScheme(key)
+    
+    // Commit to a bid
+    bid := []byte("$100")
+    message := hash.Message(bid)
+    
+    committer, _ := scheme.Committer()
+    commitment, witness, _ := committer.Commit(message, prng)
+    
+    // Send commitment to auctioneer
+    // ...
+    
+    // Later: reveal bid
+    verifier, _ := scheme.Verifier()
+    err := verifier.Verify(commitment, message, witness)
+    // err == nil means bid matches commitment
+}
+```
+
+### Direct Key Construction
+
+For testing or when you have a key directly:
+
+```go
+var key hash.Key
+io.ReadFull(prng, key[:])
+
+scheme, err := hash.NewScheme(key)
+```
+
+## Comparison
+
+| Feature | Pedersen | Hash-based |
+|---------|----------|------------|
+| Hiding | Perfect | Computational |
+| Binding | Computational | Computational |
+| Homomorphic | Yes | No |
+| Setup | Needs curve generators | Needs CRS/key |
+| Performance | ~1ms | ~0.01ms |
+| Commitment Size | 32-33 bytes | 32 bytes |
+| Quantum Resistant | No | With quantum-safe hash |
+
+## Security Considerations
+
+### Pedersen
+
+- **Generator Independence**: `H` must not equal `k·G` for any known `k`
+- **Discrete Log**: Security relies on hardness of discrete logarithm
+- **Curve Choice**: Use well-studied curves (secp256k1, P-256, BLS12-381)
+
+### Hash-Based
+
+- **Key Management**: Key must be derived from trusted CRS
+- **Witness Length**: Use at least 32 bytes of randomness
+- **Hash Function**: Use collision-resistant hash (BLAKE2, SHA-3)
+
+## Use Cases
+
+### Pedersen
+
+- **Verifiable Secret Sharing**: Commit to shares homomorphically
+- **Zero-Knowledge Proofs**: Commit to witnesses in Σ-protocols
+- **Threshold Cryptography**: Distributed key generation protocols
+
+### Hash-Based
+
+- **Sealed Bid Auctions**: Commit to bids before reveal
+- **Coin Flipping**: Multi-party randomness generation
+- **Contract Signing**: Fair exchange protocols
+
+## Related
+
+- [Encryption](/api/primitives/encryption) - For confidentiality
+- [Signatures](/api/primitives/signatures) - For authentication
+- [Hashing](/api/primitives/hashing) - For key derivation

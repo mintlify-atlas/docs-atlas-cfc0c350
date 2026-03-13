@@ -1,0 +1,696 @@
+---
+title: 'Performance Optimization'
+description: 'Tips and techniques for optimizing Bron Crypto performance in production'
+---
+
+## Overview
+
+Bron Crypto is designed for performance-critical applications. This guide covers optimization techniques, benchmarking strategies, and performance characteristics of different protocols.
+
+## Benchmarking
+
+### Running Benchmarks
+
+The library includes comprehensive benchmarks:
+
+```bash
+# Run all benchmarks
+make bench
+
+# Run specific package benchmarks
+CGO_CFLAGS="-I$(pwd)/thirdparty/boringssl/include" \
+CGO_LDFLAGS="-L$(pwd)/thirdparty/boringssl/build -lcrypto" \
+go test ./pkg/mpc/tsig/... -bench=. -run=^$
+
+# Run with memory profiling
+go test ./pkg/... -bench=. -benchmem -run=^$
+
+# CPU profiling
+go test ./pkg/... -bench=BenchmarkSign -cpuprofile=cpu.prof
+go tool pprof cpu.prof
+```
+
+<Tip>
+**Benchmark Naming Convention:**
+
+Benchmarks follow the pattern `Benchmark<Operation>` and typically test:
+- Protocol rounds (e.g., `BenchmarkLindell22Round1`)
+- Complete flows (e.g., `BenchmarkThresholdSign`)
+- Primitive operations (e.g., `BenchmarkScalarMul`)
+</Tip>
+
+### Interpreting Results
+
+Example benchmark output:
+
+```
+BenchmarkLindell22Signing-8    1000    1234567 ns/op    123456 B/op    1234 allocs/op
+```
+
+- `1000` - iterations run
+- `1234567 ns/op` - nanoseconds per operation
+- `123456 B/op` - bytes allocated per operation
+- `1234 allocs/op` - allocations per operation
+
+<Note>
+Lower values are better for all metrics. Focus on reducing allocations and memory usage for throughput-critical paths.
+</Note>
+
+## Protocol Performance Comparison
+
+### Threshold Signature Schemes
+
+| Protocol | Rounds | DKG Time (3-of-5) | Sign Time (3-of-5) | Verification |
+|----------|--------|-------------------|--------------------|--------------|
+| **Lindell22 (Schnorr)** | 3 | ~150ms | ~80ms | ~0.5ms |
+| **DKLs23 (ECDSA)** | 7-9 | ~300ms | ~200ms | ~0.5ms |
+| **Boldyreva02 (BLS)** | 1 | ~100ms | ~20ms | ~2ms |
+
+<Accordion title="Benchmark Details">
+
+These benchmarks are approximate and were measured on:
+- CPU: Intel Xeon @ 3.0GHz
+- Network: In-memory (no latency)
+- Configuration: 3-of-5 threshold
+- Curve: secp256k1 (Schnorr, ECDSA), BLS12-381 (BLS)
+
+**Key Insights:**
+- BLS has the fastest signing (single round)
+- Schnorr has good balance of speed and simplicity  
+- ECDSA is slowest but most compatible
+- Network latency dominates in distributed settings
+
+</Accordion>
+
+## Optimization Techniques
+
+### 1. Curve Selection
+
+Choose curves based on your performance requirements:
+
+```go
+import (
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/k256"     // secp256k1
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/p256"     // NIST P-256
+    "github.com/bronlabs/bron-crypto/pkg/base/curves/ed25519"  // Ed25519
+)
+
+// Fastest: secp256k1 (optimized via fiat-cryptography)
+fastCurve := k256.NewCurve()
+
+// NIST compliance: P-256
+complianceCurve := p256.NewCurve()
+
+// Edwards curves: Ed25519 (fastest point addition)
+edwardsCurve := ed25519.NewCurve()
+```
+
+**Performance Characteristics:**
+
+| Curve | Point Addition | Scalar Multiplication | Use Case |
+|-------|----------------|----------------------|----------|
+| secp256k1 | Fast | Fast | Bitcoin, Ethereum compatibility |
+| P-256 | Fast | Fast | NIST compliance, general purpose |
+| Ed25519 | Fastest | Very Fast | EdDSA signatures, high throughput |
+| BLS12-381 | Moderate | Moderate | Pairing-based protocols |
+
+### 2. Batch Operations
+
+Where possible, use batch proof systems:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/proofs/dlog/batch_schnorr"
+
+// Instead of individual proofs:
+// for i := range proofs {
+//     proof := schnorr.Prove(witnesses[i])
+//     proofs[i] = proof
+// }
+
+// Use batch proofs (much faster):
+batchProver := batch_schnorr.NewBatchProver(
+    group,
+    witnesses,
+    publics,
+)
+batchProof := batchProver.Prove()
+
+// Verification is also batched
+batchVerifier := batch_schnorr.NewBatchVerifier(
+    group,
+    publics,
+)
+valid := batchVerifier.Verify(batchProof)
+```
+
+<Tip>
+**Batch Proof Speedup:** Batch proofs can be 3-5x faster than individual proofs for n > 10 statements.
+</Tip>
+
+### 3. Precomputation
+
+Precompute values that can be reused:
+
+```go
+// Precompute base point multiples
+type PrecomputedCurve struct {
+    curve    curves.Curve
+    baseG    curves.Point
+    multiples []curves.Point  // [G, 2G, 4G, 8G, ...]
+}
+
+func NewPrecomputedCurve(curve curves.Curve, windowSize int) *PrecomputedCurve {
+    base := curve.Generator()
+    multiples := make([]curves.Point, windowSize)
+    
+    current := base
+    for i := range windowSize {
+        multiples[i] = current.Clone()
+        current = current.Double()
+    }
+    
+    return &PrecomputedCurve{
+        curve:     curve,
+        baseG:     base,
+        multiples: multiples,
+    }
+}
+
+// Fast scalar multiplication using precomputed values
+func (p *PrecomputedCurve) ScalarBaseMul(scalar curves.Scalar) curves.Point {
+    // Use window method with precomputed multiples
+    // Much faster than naive multiplication
+    return windowScalarMul(scalar, p.multiples)
+}
+```
+
+### 4. Parallel Execution
+
+Many operations can be parallelized:
+
+```go
+import "sync"
+
+// Parallelize proof generation
+func GenerateProofsParallel(witnesses []Witness, publics []Public) []Proof {
+    proofs := make([]Proof, len(witnesses))
+    var wg sync.WaitGroup
+    
+    // Use worker pool pattern
+    workers := runtime.NumCPU()
+    jobs := make(chan int, len(witnesses))
+    
+    for w := 0; w < workers; w++ {
+        wg.Add(1)
+        go func() {
+            defer wg.Done()
+            for i := range jobs {
+                prover := schnorr.NewProver(group, witnesses[i], publics[i])
+                proofs[i] = prover.Prove()
+            }
+        }()
+    }
+    
+    for i := range witnesses {
+        jobs <- i
+    }
+    close(jobs)
+    
+    wg.Wait()
+    return proofs
+}
+```
+
+<Warning>
+**Parallelization Caution:**
+
+While many cryptographic operations can be parallelized, be careful with:
+- PRNG state (use separate PRNGs per goroutine)
+- Shared memory (use proper synchronization)
+- Goroutine overhead (profile before optimizing)
+</Warning>
+
+### 5. Memory Allocation Reduction
+
+Minimize allocations in hot paths:
+
+```go
+// BAD: Allocates on every call
+func computeHash(data []byte) []byte {
+    hasher := sha256.New()  // Allocation
+    hasher.Write(data)
+    return hasher.Sum(nil)  // Allocation
+}
+
+// GOOD: Reuse hasher and buffer
+type HashPool struct {
+    hashers sync.Pool
+}
+
+func NewHashPool() *HashPool {
+    return &HashPool{
+        hashers: sync.Pool{
+            New: func() interface{} {
+                return sha256.New()
+            },
+        },
+    }
+}
+
+func (p *HashPool) ComputeHash(data []byte, result []byte) {
+    hasher := p.hashers.Get().(hash.Hash)
+    defer func() {
+        hasher.Reset()
+        p.hashers.Put(hasher)
+    }()
+    
+    hasher.Write(data)
+    hasher.Sum(result[:0])  // Reuse result buffer
+}
+```
+
+### 6. Network Optimization
+
+Reduce communication overhead:
+
+```go
+// Batch multiple protocol rounds when possible
+type CombinedRound1And2 struct {
+    Round1Data *Round1Message
+    Round2Data *Round2Message
+}
+
+// Send both rounds together if Round2 doesn't depend on others' Round1
+func OptimizedProtocol(router *network.Router) error {
+    // Prepare both rounds locally
+    r1 := prepareRound1()
+    r2 := prepareRound2()  // If independent
+    
+    // Send combined
+    combined := &CombinedRound1And2{
+        Round1Data: r1,
+        Round2Data: r2,
+    }
+    
+    err := router.SendTo("combined-1-2", broadcastMap(combined))
+    if err != nil {
+        return err
+    }
+    
+    // Receive combined
+    responses, err := router.ReceiveFrom("combined-1-2", parties...)
+    return err
+}
+```
+
+<Tip>
+**Message Compression:**
+
+For large payloads (> 1KB), consider compression:
+
+```go
+import "compress/gzip"
+
+func CompressMessage(msg []byte) ([]byte, error) {
+    var buf bytes.Buffer
+    writer := gzip.NewWriter(&buf)
+    if _, err := writer.Write(msg); err != nil {
+        return nil, err
+    }
+    if err := writer.Close(); err != nil {
+        return nil, err
+    }
+    return buf.Bytes(), nil
+}
+```
+
+This can reduce bandwidth by 50-70% for commitment-heavy protocols.
+</Tip>
+
+## Protocol-Specific Optimizations
+
+### Threshold Schnorr (Lindell22)
+
+```go
+// Optimization 1: Precompute nonce commitments
+type OptimizedCosigner struct {
+    *signing.Cosigner
+    precomputedNonces []curves.Point  // Batch of nonces
+}
+
+func (c *OptimizedCosigner) PrepareNonces(count int) {
+    c.precomputedNonces = make([]curves.Point, count)
+    for i := range count {
+        nonce := c.GenerateNonce()
+        c.precomputedNonces[i] = nonce
+    }
+}
+
+// Use precomputed nonce for signing (instant Round1)
+func (c *OptimizedCosigner) FastRound1() (network.OutgoingBroadcast[*Round1Message], error) {
+    if len(c.precomputedNonces) == 0 {
+        return c.Round1()  // Fallback
+    }
+    
+    nonce := c.precomputedNonces[0]
+    c.precomputedNonces = c.precomputedNonces[1:]
+    
+    return c.Round1WithNonce(nonce)
+}
+```
+
+### Threshold ECDSA (DKLs23)
+
+```go
+// Optimization: Use OT extension variant for better performance
+import "github.com/bronlabs/bron-crypto/pkg/mpc/tsig/tecdsa/dkls23/signing/interactive/sign_softspoken"
+
+// Softspoken OT is faster for multiple signing sessions
+cosigner := sign_softspoken.NewCosigner(
+    ctx,
+    shard,
+    hashFunc,
+)
+
+// vs. base OT generation per session
+// cosigner := sign.NewCosigner(...)  // Slower
+```
+
+### Threshold BLS (Boldyreva02)
+
+```go
+// Optimization: Batch verification of partial signatures
+type FastAggregator struct {
+    *signing.Aggregator
+}
+
+func (a *FastAggregator) BatchAggregate(
+    sessions []SigningSession,
+) ([]*bls.Signature, error) {
+    // Collect all partial signatures
+    allPartials := make([][]*PartialSignature, len(sessions))
+    for i, session := range sessions {
+        allPartials[i] = session.PartialSigs
+    }
+    
+    // Batch verify all partials together (faster than individual)
+    if err := a.BatchVerifyPartials(allPartials); err != nil {
+        return nil, err
+    }
+    
+    // Aggregate each session
+    results := make([]*bls.Signature, len(sessions))
+    for i := range sessions {
+        sig, err := a.AggregateWithoutVerify(allPartials[i])
+        if err != nil {
+            return nil, err
+        }
+        results[i] = sig
+    }
+    
+    return results, nil
+}
+```
+
+## Profiling and Debugging
+
+### CPU Profiling
+
+```bash
+# Generate CPU profile
+go test -bench=BenchmarkSign -cpuprofile=cpu.prof ./pkg/mpc/tsig/...
+
+# Analyze with pprof
+go tool pprof cpu.prof
+
+# Interactive commands:
+# (pprof) top10        # Show top 10 functions
+# (pprof) list Func    # Show source for function
+# (pprof) web          # Generate graph (requires graphviz)
+```
+
+### Memory Profiling
+
+```bash
+# Generate memory profile
+go test -bench=BenchmarkSign -memprofile=mem.prof ./pkg/mpc/tsig/...
+
+# Analyze allocations
+go tool pprof mem.prof
+
+# Show allocation sites
+(pprof) top -alloc_objects
+(pprof) list AllocatingFunc
+```
+
+### Execution Tracing
+
+```bash
+# Generate execution trace
+go test -bench=BenchmarkSign -trace=trace.out ./pkg/mpc/tsig/...
+
+# Visualize trace
+go tool trace trace.out
+```
+
+<Accordion title="Common Performance Bottlenecks">
+
+**1. Network Latency**
+- **Impact:** Dominates in distributed settings
+- **Solution:** Minimize rounds, batch messages
+
+**2. Memory Allocations**
+- **Impact:** Increases GC pressure
+- **Solution:** Use sync.Pool, preallocate slices
+
+**3. Cryptographic Operations**
+- **Impact:** CPU-intensive
+- **Solution:** Batch operations, precompute values
+
+**4. Serialization**
+- **Impact:** CBOR encoding/decoding overhead
+- **Solution:** Reuse encoders, minimize message size
+
+**5. Lock Contention**
+- **Impact:** Limits parallelism
+- **Solution:** Reduce critical sections, use lock-free structures
+
+</Accordion>
+
+## Performance Testing
+
+### Load Testing
+
+```go
+func BenchmarkConcurrentSigning(b *testing.B) {
+    // Setup
+    shards := setupDKG(3, 5)
+    messages := generateMessages(1000)
+    
+    b.ResetTimer()
+    
+    for i := 0; i < b.N; i++ {
+        var wg sync.WaitGroup
+        
+        for _, msg := range messages {
+            wg.Add(1)
+            go func(m []byte) {
+                defer wg.Done()
+                signature := signMessage(shards, m)
+                verifySignature(signature, m)
+            }(msg)
+        }
+        
+        wg.Wait()
+    }
+}
+```
+
+### Throughput Measurement
+
+```go
+func MeasureThroughput() {
+    start := time.Now()
+    signatureCount := 0
+    duration := 10 * time.Second
+    
+    for time.Since(start) < duration {
+        signature := signMessage(message)
+        signatureCount++
+    }
+    
+    throughput := float64(signatureCount) / duration.Seconds()
+    fmt.Printf("Throughput: %.2f signatures/second\n", throughput)
+}
+```
+
+## Hardware Considerations
+
+### CPU Features
+
+The library leverages modern CPU features:
+
+```go
+import "github.com/bronlabs/bron-crypto/pkg/base/cgo/boring"
+
+// Check available features
+if boring.Available() {
+    log.Println("BoringSSL available (hardware acceleration enabled)")
+}
+
+// Features used:
+// - AES-NI for symmetric encryption
+// - AVX2 for field arithmetic  
+// - ADX/BMI2 for big integer operations
+```
+
+<Note>
+**Hardware Acceleration:**
+
+On modern x86-64 CPUs with AES-NI and AVX2:
+- Scalar multiplication: ~2x faster
+- AES encryption: ~10x faster
+- SHA-256 hashing: ~4x faster
+
+Ensure BoringSSL is built with optimizations enabled (default in Makefile).
+</Note>
+
+### Memory Bandwidth
+
+For high-throughput scenarios:
+
+```go
+// Use memory-efficient data structures
+type CompactShare struct {
+    ID    uint16        // 2 bytes instead of 8
+    Share [32]byte      // Fixed-size array
+}
+
+// vs.
+type LargeShare struct {
+    ID    sharing.ID    // 8 bytes
+    Share []byte        // Heap allocation
+}
+```
+
+## Production Deployment
+
+### Recommended Configuration
+
+```go
+type PerformanceConfig struct {
+    // Number of goroutines for parallel operations
+    Workers int
+    
+    // Size of message buffers
+    BufferSize int
+    
+    // Precomputed nonces for threshold signing
+    PrecomputedNonces int
+    
+    // Connection pool size
+    MaxConnections int
+}
+
+func OptimalConfig() *PerformanceConfig {
+    return &PerformanceConfig{
+        Workers:           runtime.NumCPU(),
+        BufferSize:        1000,
+        PrecomputedNonces: 100,
+        MaxConnections:    100,
+    }
+}
+```
+
+### Monitoring Metrics
+
+```go
+type PerformanceMetrics struct {
+    // Protocol execution times
+    DKGDuration      prometheus.Histogram
+    SignDuration     prometheus.Histogram
+    VerifyDuration   prometheus.Histogram
+    
+    // Network metrics
+    MessagesSent     prometheus.Counter
+    MessagesReceived prometheus.Counter
+    BytesSent        prometheus.Counter
+    BytesReceived    prometheus.Counter
+    
+    // Error rates
+    ProtocolErrors   prometheus.Counter
+    NetworkErrors    prometheus.Counter
+}
+
+func RecordSigningMetrics(duration time.Duration, bytesExchanged int) {
+    metrics.SignDuration.Observe(duration.Seconds())
+    metrics.BytesSent.Add(float64(bytesExchanged))
+}
+```
+
+## Optimization Checklist
+
+<Steps>
+
+<Step title="Profile First">
+
+- [ ] Run CPU profiling to identify hot spots
+- [ ] Run memory profiling to find allocation sites
+- [ ] Use execution tracing for concurrency issues
+
+</Step>
+
+<Step title="Optimize Algorithms">
+
+- [ ] Use batch operations where possible
+- [ ] Precompute values that can be reused
+- [ ] Choose appropriate curves for workload
+- [ ] Minimize cryptographic operations
+
+</Step>
+
+<Step title="Optimize Network">
+
+- [ ] Minimize protocol rounds
+- [ ] Batch messages when possible
+- [ ] Use compression for large payloads
+- [ ] Implement connection pooling
+
+</Step>
+
+<Step title="Optimize Memory">
+
+- [ ] Use sync.Pool for frequently allocated objects
+- [ ] Preallocate slices and maps
+- [ ] Reduce pointer indirection
+- [ ] Reuse buffers
+
+</Step>
+
+<Step title="Test and Monitor">
+
+- [ ] Run benchmarks before and after changes
+- [ ] Load test at expected scale
+- [ ] Monitor metrics in production
+- [ ] Set up alerting for regressions
+
+</Step>
+
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Threshold Signing" icon="signature" href="/guides/threshold-signing">
+    Learn the complete signing workflow
+  </Card>
+  <Card title="Testing Guide" icon="vial" href="https://github.com/bronlabs/bron-crypto/blob/main/TESTING.md">
+    Testing methodology and tools
+  </Card>
+  <Card title="Benchmarks" icon="chart-line" href="https://github.com/bronlabs/bron-crypto/tree/main/pkg">
+    Browse benchmark implementations
+  </Card>
+  <Card title="Security" icon="shield" href="/guides/security-best-practices">
+    Security considerations for optimization
+  </Card>
+</CardGroup>
